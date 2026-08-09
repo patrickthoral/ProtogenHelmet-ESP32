@@ -1,6 +1,6 @@
 //Make sure you have everything connected by the schematic in the repository and set these defines correctly!
 
-#define MICpin ADC_CHANNEL_0 //Microphone, pin 1
+#define MICpin ADC1_CHANNEL_0 //Microphone, pin 1
 #define T_in 2 //Output from Touch Sensor (for KY-032, Capac)
 #define T_en 42 //Enable pin to Touch Sensor (for KY-032)
 #define DATA_PIN_EARS 5  //Ears(Blush) (from outer to inner, POV-right cheek, (if blush: from top to bottom, right cheek nearest to ear first))
@@ -39,8 +39,7 @@ bool INApresent = false; //Are you using INA219?
 
 #include <Arduino.h>
 
-#include "esp_adc/adc_oneshot.h"
-adc_oneshot_unit_handle_t adc_handle;
+#include "driver/adc.h" //Arduino 2.x/IDF4.4 legacy ADC driver (official espressif32 platform is pinned to arduino-esp32 2.0.17 / IDF4.4, which doesn't have the esp_adc/adc_oneshot.h driver from IDF5.x)
 
 #define earTypeSize 6
 #define visTypeSize 2
@@ -537,8 +536,8 @@ void startWiFiWeb() {
     if(request->hasParam("duty")) {
       int duty = request->getParam("duty")->value().toInt();
       if(duty < 256 && duty >= 0) {
-        //ledcWrite(0, duty);
-        ledcWrite(fanPWM, duty); //Arduino 3.x core
+        ledcWrite(0, duty); //Arduino 2.x core (official espressif32 platform is pinned to arduino-esp32 2.0.17)
+        //ledcWrite(fanPWM, duty); //Arduino 3.x core
         cfg.fanDuty = duty;
         cfg.save();
         request->send(200, "text/plain", "Set PWM to: " + String(duty));
@@ -631,22 +630,14 @@ void setup() {
 
   micDC = (float)cfg.spMin;
 
-  adc_oneshot_unit_init_cfg_t init_config = {
-    .unit_id = ADC_UNIT_1,
-    .ulp_mode = ADC_ULP_MODE_DISABLE,
-  };
-  ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc_handle));
-  adc_oneshot_chan_cfg_t channel_config = {
-      .atten = ADC_ATTEN_DB_12,
-      .bitwidth = ADC_BITWIDTH_12,
-  };
-  ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, MICpin, &channel_config));
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(MICpin, ADC_ATTEN_DB_11); //DB_11 is the IDF4.4 name for what IDF5.x renamed to DB_12 (same attenuation setting)
 
-  ledcAttach(fanPWM, 25000, 8); //suport Arduino 3.x
-  ledcWrite(fanPWM, cfg.fanDuty); //Arduino 3.x core
-  //ledcSetup(0, 25000, 8); //For Arduino 2.x
-  //ledcAttachPin(fanPWM, 0); //For Arduino 2.x
-  //ledcWrite(0, cfg.fanDuty); //for Arduino 2.x
+  //ledcAttach(fanPWM, 25000, 8); //support Arduino 3.x
+  //ledcWrite(fanPWM, cfg.fanDuty); //Arduino 3.x core
+  ledcSetup(0, 25000, 8); //For Arduino 2.x
+  ledcAttachPin(fanPWM, 0); //For Arduino 2.x
+  ledcWrite(0, cfg.fanDuty); //for Arduino 2.x
 
   if(visorType == "WS2812") {
     ledController[0] = &FastLED.addLeds<WS2812B, DATA_PIN_VISOR, GRB>(visorLeds, visorLedsNum);
@@ -943,7 +934,7 @@ void loop() {
   if(cfg.speechEna) { //1.045uS
     int nvol = 0, micline = 0, rawInput = 0;
     for (int i = 0; i<32; i++){
-      adc_oneshot_read(adc_handle, MICpin, &rawInput);
+      rawInput = adc1_get_raw(MICpin);
       micline = abs(rawInput - 512);
       nvol = max(micline, nvol);
     }
