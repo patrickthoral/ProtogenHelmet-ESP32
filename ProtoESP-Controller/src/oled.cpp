@@ -17,19 +17,26 @@ void SSDOLED::oledBright(int level) const {
 }
 
 //--------------------------------//OLED Init
-bool SSDOLED::init(uint8_t oledAddr, int brightness, bool INA) {
+bool SSDOLED::init(uint8_t oledAddr, int brightness, bool INA, bool flip) {
   INAavail = INA;
   Wire.beginTransmission(oledAddr); //check for oled on address 0x3c
   byte error = Wire.endTransmission();
   if(error == 0) {
     u8g2.setI2CAddress(oledAddr*2);
     u8g2.begin();
-    u8g2.setFlipMode(2);
+    u8g2.setFlipMode(flip ? 1 : 0);
     oledBright(brightness);
     return true;
   } else {
     return false;
   }
+}
+
+//--------------------------------//OLED Flip (180 deg), applied live without a re-init
+void SSDOLED::setFlip(bool flip) const {
+  u8g2.setFlipMode(flip ? 1 : 0);
+  u8g2.clearBuffer(); //avoid a garbled mixed-orientation frame; normal redraws repopulate it
+  u8g2.sendBuffer();
 }
 
 //--------------------------------//Animation name

@@ -427,6 +427,10 @@ void startWiFiWeb() {
     cfg.getBool(request, "tiltEna", cfg.tiltEna);
     cfg.getBool(request, "bleEna", cfg.bleEna);
     cfg.getBool(request, "oledEna", cfg.oledEna);
+    if(cfg.getBool(request, "oledFlip", cfg.oledFlip)) {
+        if(cfg.oledEna && oledInitDone)
+            oled.setFlip(cfg.oledFlip);
+    }
     //brightness
     cfg.getInt(request, "bEar", cfg.bEar);
     cfg.getInt(request, "bVisor", cfg.bVisor);
@@ -631,7 +635,7 @@ void setup() {
   micDC = (float)cfg.spMin;
 
   adc1_config_width(ADC_WIDTH_BIT_12);
-  adc1_config_channel_atten(MICpin, ADC_ATTEN_DB_11); //DB_11 is the IDF4.4 name for what IDF5.x renamed to DB_12 (same attenuation setting)
+  adc1_config_channel_atten(MICpin, ADC_ATTEN_DB_12); //same attenuation as the old ADC_ATTEN_DB_11 name, just renamed
 
   //ledcAttach(fanPWM, 25000, 8); //support Arduino 3.x
   //ledcWrite(fanPWM, cfg.fanDuty); //Arduino 3.x core
@@ -680,7 +684,7 @@ void setup() {
   }
 
   if(cfg.oledEna) {
-    if(!oled.init(oledAddr,cfg.bOled,INApresent)) {
+    if(!oled.init(oledAddr,cfg.bOled,INApresent,cfg.oledFlip)) {
       logPrint(F("[E] An Error has occurred while initializing SSD1306!"));
       cfg.oledEna = false;
     } else {
@@ -1152,7 +1156,7 @@ void loop() {
     //Serial.println(">OLED:"+String(micros()-looptime));
   }
   if (!oledInitDone && cfg.oledEna) {
-    if(!oled.init(oledAddr,cfg.bOled,INApresent)) {
+    if(!oled.init(oledAddr,cfg.bOled,INApresent,cfg.oledFlip)) {
       logPrint(F("[E] An Error has occurred while initializing SSD1306."));
       cfg.oledEna = false;
     } else {

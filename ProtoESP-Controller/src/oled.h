@@ -61,8 +61,9 @@ static unsigned char remOFFlrg_bits[] = {
 
 class SSDOLED {
 public:
-  bool init(uint8_t,int,bool);
+  bool init(uint8_t,int,bool,bool);
   void oledBright(int) const;
+  void setFlip(bool) const;
   void writeSet(int) const;
   int writeAnim(String) const;
   void writeINA(float,float) const;
