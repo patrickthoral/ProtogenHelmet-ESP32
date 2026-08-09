@@ -46,6 +46,8 @@
           <input type="checkbox" id="oled">
           <label for="oledFlip">Flip OLED</label>
           <input type="checkbox" id="oledFlip">
+          <label for="ina">INA219</label>
+          <input type="checkbox" id="ina">
           <br>
           <button type="button" onclick="saveConfig()">Save config</button>
         </form>
@@ -330,6 +332,7 @@
 				document.getElementById("ble").checked = obj.bleEna;
         document.getElementById("oled").checked = obj.oledEna;
         document.getElementById("oledFlip").checked = obj.oledFlip;
+        document.getElementById("ina").checked = obj.inaEna;
 				document.getElementsByName("bEar")[0].value = obj.bEar;
 				document.getElementsByName("bVisor")[0].value = obj.bVisor;
         document.getElementsByName("bOled")[0].value = obj.bOled;
@@ -376,7 +379,7 @@
 	loadConfig();
 
 	function saveConfig() {
-		var params = "boopEna="+document.getElementById("boop").checked+"&speechEna="+document.getElementById("speech").checked+"&tiltEna="+document.getElementById("tilt").checked+"&bleEna="+document.getElementById("ble").checked+"&oledEna="+document.getElementById("oled").checked+"&oledFlip="+document.getElementById("oledFlip").checked;
+		var params = "boopEna="+document.getElementById("boop").checked+"&speechEna="+document.getElementById("speech").checked+"&tiltEna="+document.getElementById("tilt").checked+"&bleEna="+document.getElementById("ble").checked+"&oledEna="+document.getElementById("oled").checked+"&oledFlip="+document.getElementById("oledFlip").checked+"&inaEna="+document.getElementById("ina").checked;
 		var xhr = new XMLHttpRequest();
 		xhr.open("GET", "/saveconfig?"+params, true);
     xhr.onload = function() {

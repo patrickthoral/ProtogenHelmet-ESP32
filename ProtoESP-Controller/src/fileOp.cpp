@@ -27,6 +27,7 @@ void Config::setDefault() {
   bleEna = false;
   oledEna = false;
   oledFlip = true;
+  inaEna = false;
   bEar = 60;
   bVisor = 100;
   bOled = 2;
@@ -65,6 +66,7 @@ bool Config::save() {
   doc["bleEna"] = bleEna;
   doc["oledEna"] = oledEna;
   doc["oledFlip"] = oledFlip;
+  doc["inaEna"] = inaEna;
   doc["bEar"] = bEar;
   doc["bVisor"] = bVisor;
   doc["bOled"] = bOled;
@@ -168,6 +170,7 @@ bool Config::load() {
   bleEna = doc["bleEna"].as<bool>();
   oledEna = doc["oledEna"].as<bool>();
   oledFlip = doc["oledFlip"].as<bool>();
+  inaEna = doc["inaEna"].as<bool>();
   bEar = doc["bEar"].as<int>();
   bVisor = doc["bVisor"].as<int>();
   bOled = doc["bOled"].as<int>();

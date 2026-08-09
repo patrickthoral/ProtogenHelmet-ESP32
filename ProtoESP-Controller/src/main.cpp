@@ -25,7 +25,6 @@ bool blushPresent = false; // Are you using blush leds?
 #define blushLedsNum 8 // How many? (might crash under 8)
 bool useRGBblush = true; //Swaps red-green for RGB strip
 
-bool INApresent = false; //Are you using INA219?
 
 #define boopMode "APDS9960" //"KY-032" for KY-032, "Capac" for capacitive sensor/boop when HIGH, "APDS9960" for ADPS9960, "VL53L1X" for VL53L1X, leave empty for none
 
@@ -120,7 +119,7 @@ void logPrint(const String &str) {
 AsyncWebServer server(80);
 
 //--------------------------------//Config vars
-bool instantReload = false, oledInitDone = false, tiltInitDone = false, getfilesProper = true, ToFInitDone = false;
+bool instantReload = false, oledInitDone = false, tiltInitDone = false, getfilesProper = true, ToFInitDone = false, inaInitDone = false;
 uint8_t currentEarsFrame = 0, currentVisorFrame = 0, numOfSegm, numAnimBlush, totalAnims;
 uint16_t visorLedsNum = MATRIXESNUM*64;
 String currentAnim = "", animToLoad = "", availAnims[50], getfilesCache;
@@ -431,6 +430,7 @@ void startWiFiWeb() {
         if(cfg.oledEna && oledInitDone)
             oled.setFlip(cfg.oledFlip);
     }
+    cfg.getBool(request, "inaEna", cfg.inaEna); //actual (re-)init happens in loop() via inaInitDone retry, no crash risk from reading before begin()
     //brightness
     cfg.getInt(request, "bEar", cfg.bEar);
     cfg.getInt(request, "bVisor", cfg.bVisor);
@@ -684,7 +684,7 @@ void setup() {
   }
 
   if(cfg.oledEna) {
-    if(!oled.init(oledAddr,cfg.bOled,INApresent,cfg.oledFlip)) {
+    if(!oled.init(oledAddr,cfg.bOled,cfg.inaEna,cfg.oledFlip)) {
       logPrint(F("[E] An Error has occurred while initializing SSD1306!"));
       cfg.oledEna = false;
     } else {
@@ -694,12 +694,13 @@ void setup() {
     }
   }
 
-  if(INApresent && oledInitDone) {
+  if(cfg.inaEna && oledInitDone) {
     if(!ina219.begin()) {
       logPrint(F("[E] An Error has occurred while initializing INA219 chip!"));
-      INApresent = false;
+      cfg.inaEna = false;
     } else {
       ina219.setCalibration_16V_8A();
+      inaInitDone = true;
     }
   }
 
@@ -1137,7 +1138,7 @@ void loop() {
   //--------------------------------//OLED routine, ~~10ms qwq~~, 1-5ms.. eh better
   if(cfg.oledEna && oledInitDone && vaStatLast+1000<millis()) {
     //looptime = micros();
-    if(INApresent) {
+    if(cfg.inaEna && inaInitDone) {
       oled.writeINA(ina219.getBusVoltage_V(),ina219.getCurrent_mA());
     }
     if(cfg.bleEna) {
@@ -1156,11 +1157,20 @@ void loop() {
     //Serial.println(">OLED:"+String(micros()-looptime));
   }
   if (!oledInitDone && cfg.oledEna) {
-    if(!oled.init(oledAddr,cfg.bOled,INApresent,cfg.oledFlip)) {
+    if(!oled.init(oledAddr,cfg.bOled,cfg.inaEna,cfg.oledFlip)) {
       logPrint(F("[E] An Error has occurred while initializing SSD1306."));
       cfg.oledEna = false;
     } else {
       oledInitDone = true;
+    }
+  }
+  if (!inaInitDone && cfg.inaEna && oledInitDone) { //retry so enabling INA219 live (web toggle) doesn't need a reboot
+    if(!ina219.begin()) {
+      logPrint(F("[E] An Error has occurred while initializing INA219 chip."));
+      cfg.inaEna = false;
+    } else {
+      ina219.setCalibration_16V_8A();
+      inaInitDone = true;
     }
   }
 
