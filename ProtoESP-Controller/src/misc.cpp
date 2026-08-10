@@ -9,7 +9,7 @@ float mapfloat(float x, float in_min, float in_max, float out_min, float out_max
 }
 
 //--------------------------------//Dynamic speak anim
-uint64_t speakMatrix(uint64_t input, uint8_t columns, bool inverted) {
+uint64_t speakMatrix(uint64_t input, uint8_t columns, bool inverted, long colorArray[8][8]) {
   int darray[8][8];
 
   // convert uint64_t to 2D array
@@ -31,6 +31,7 @@ uint64_t speakMatrix(uint64_t input, uint8_t columns, bool inverted) {
     for (int j = 0; j < 8; j++) {
       if (darray[j][i] == 1 && j != 0) {
         darray[j-1][i] = 1;
+        if (colorArray) colorArray[j-1][i] = colorArray[j][i]; //newly-opened pixel inherits the color of the lit pixel it grew from
         break;
       }
     }
@@ -38,6 +39,7 @@ uint64_t speakMatrix(uint64_t input, uint8_t columns, bool inverted) {
     for (int j = 7; j > -1; j--) {
       if (darray[j][i] == 1 && j != 7) {
         darray[j+1][i] = 1;
+        if (colorArray) colorArray[j+1][i] = colorArray[j][i];
         break;
       }
     }

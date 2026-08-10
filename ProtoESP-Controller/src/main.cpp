@@ -748,7 +748,7 @@ float zAx,yAx,finalMicAvg,avgMicArr[10], micAttack = 0.35f, micRelease = 0.2f, e
 int boopRead, startIndex = 1, micVolume, currentMicAvg = 0, btnNum = 0, currFade = 1, apdsprox = 255;
 unsigned long lastMillsEars = 0, lastMillsVisor = 0, lastMillsTilt = 0, laskSpeakCheck = 0, lastMillsBoop = 0, lastFLED = 0, vaStatLast = 0, btnPressTime = 0, tiltChange = 0, check0button = 0, looptime = 0, fadeTime = 0, laskSpeakAnim = 0, lastBoopCheck = 0;
 
-void dynamicSpeak(uint64_t *leds, bool isMouth[MATRIXESNUM], int volume) {
+void dynamicSpeak(uint64_t *leds, long colors[MATRIXESNUM][64], bool isMouth[MATRIXESNUM], int volume) {
   int mouthIndexes[MATRIXESNUM];
   int mouthCount = 0;
   for (int i = 0; i < MATRIXESNUM; i++) { // collect true (mouth) indexes
@@ -763,8 +763,21 @@ void dynamicSpeak(uint64_t *leds, bool isMouth[MATRIXESNUM], int volume) {
     int rightIndex = mouthIndexes[half + i];
     if (x > 0) {
       x = constrain(x, 0, 8);
-      leds[leftIndex]  = speakMatrix(leds[leftIndex],  x, true);
-      leds[rightIndex] = speakMatrix(leds[rightIndex], x, false);
+      static long colorL[8][8], colorR[8][8]; //static: keep off the loop task's stack (only called from the single main loop task, never reentrant)
+      for(int a = 0; a < 8; a++) {
+        for(int b = 0; b < 8; b++) {
+          colorL[a][b] = colors[leftIndex][(a*8)+b];
+          colorR[a][b] = colors[rightIndex][(a*8)+b];
+        }
+      }
+      leds[leftIndex]  = speakMatrix(leds[leftIndex],  x, true,  colorL);
+      leds[rightIndex] = speakMatrix(leds[rightIndex], x, false, colorR);
+      for(int a = 0; a < 8; a++) {
+        for(int b = 0; b < 8; b++) {
+          colors[leftIndex][(a*8)+b]  = colorL[a][b];
+          colors[rightIndex][(a*8)+b] = colorR[a][b];
+        }
+      }
     }
   }
 }
@@ -772,8 +785,10 @@ void dynamicSpeak(uint64_t *leds, bool isMouth[MATRIXESNUM], int volume) {
 void setAllVisor(struct CRGB *ledArray, long ledColor, int visorFrame) {
   uint64_t tempLeds[MATRIXESNUM];
   memcpy(tempLeds, visorNow->frames[visorFrame].leds, sizeof(tempLeds));
+  static long tempColors[MATRIXESNUM][64]; //static: ~2.8KB is too much to put on the loop task's 8KB stack on every call
+  memcpy(tempColors, visorNow->frames[visorFrame].ppColor, sizeof(tempColors));
   if(speaking) {
-    dynamicSpeak(tempLeds, visorNow->isMouth, micVolume);
+    dynamicSpeak(tempLeds, tempColors, visorNow->isMouth, micVolume);
   }
   for(int y = 0; y < numOfSegm; y++) {
     for (int i = 0; i < 8; i++) {
@@ -782,8 +797,8 @@ void setAllVisor(struct CRGB *ledArray, long ledColor, int visorFrame) {
         if(visorType == "WS2812") {
           long tempColor = ledColor; //use given color
           if(ledColor == 0) { //if not given a color
-            if(visorNow->frames[visorFrame].ppColor[y][(i*8)+j] != 0) { //use ppColor if available
-              tempColor = visorNow->frames[visorFrame].ppColor[y][(i*8)+j];
+            if(tempColors[y][(i*8)+j] != 0) { //use ppColor if available (speak-opened pixels inherit the nearest lit pixel's color, see dynamicSpeak)
+              tempColor = tempColors[y][(i*8)+j];
             } else if(visorNow->frames[visorFrame].fColor[y] != 0) { //if not, use fColor if available
               tempColor = visorNow->frames[visorFrame].fColor[y];
             } else { // else config color
