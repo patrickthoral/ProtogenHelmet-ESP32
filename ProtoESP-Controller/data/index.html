@@ -48,6 +48,28 @@
           <input type="checkbox" id="oledFlip">
           <label for="ina">INA219</label>
           <input type="checkbox" id="ina">
+          <label for="oledAnimMode">OLED name display <sup onclick="alert('Text: shows the animation file name.\nAnimation: shows a live preview of the visor instead (needs a visor layout selected below).\nAnimation + Text: same preview, plus a small name label to the right — useful since on a 1-bit display some animations don\'t read clearly as a shape alone.')">&#9432;</sup></label>
+          <select id="oledAnimMode" onchange="onOledAnimModeChange()">
+            <option value="0">Text</option>
+            <option value="1">Animation</option>
+            <option value="2">Animation + Text</option>
+          </select>
+          <span id="visorLayoutWrap" style="display:none">
+            <label for="visorLayout">Visor layout <sup onclick="alert('Tells the OLED where each of the visor\'s segments physically sits. Only needs to be set once -- pick your board (or Custom) and Save. It resets to \'-- select --\' every time this page loads, but that just means \'keep the layout already saved on the device\'; leave it blank on subsequent saves.')">&#9432;</sup></label>
+            <select id="visorLayout" onchange="onVisorLayoutChange()">
+              <option value="">-- select --</option>
+              <option value="M16mk2">M16 mk2</option>
+              <option value="M16mk3">M16 mk3</option>
+              <option value="BFoxCZ">BFoxCZ</option>
+              <option value="custom">Custom</option>
+            </select>
+            <span id="visorLayoutCustomWrap" style="display:none">
+              <label for="visorLayoutCustom">Custom layout string</label>
+              <input type="text" id="visorLayoutCustom" placeholder="t0;t1;-;_;...">
+              <label for="visorLayoutMouthCustom">Custom mouth mask</label>
+              <input type="text" id="visorLayoutMouthCustom" placeholder="[false,true,...]">
+            </span>
+          </span>
           <br>
           <button type="button" onclick="saveConfig()">Save config</button>
         </form>
@@ -333,6 +355,8 @@
         document.getElementById("oled").checked = obj.oledEna;
         document.getElementById("oledFlip").checked = obj.oledFlip;
         document.getElementById("ina").checked = obj.inaEna;
+        document.getElementById("oledAnimMode").value = obj.oledAnimMode;
+        onOledAnimModeChange();
 				document.getElementsByName("bEar")[0].value = obj.bEar;
 				document.getElementsByName("bVisor")[0].value = obj.bVisor;
         document.getElementsByName("bOled")[0].value = obj.bOled;
@@ -378,8 +402,46 @@
 	}
 	loadConfig();
 
+	//visor layout presets, same strings as animator.html's #visorConfig presets (M16mk2/M16mk3/BFoxCZ)
+	var visorPresets = {
+	  M16mk2: { visType: "t0;t1;-;-;-;t9;t10;_;blush0;blush1;-;t5;-;blush2;blush3;_;t2;t3;t4;-;t6;t7;t8", visTypeMouth: "[false,false,true,true,true,false,true,true,true,false,false]" },
+	  M16mk3: { visType: "t0;t1;-;-;-;-;-;-;t12;t13;_;blush0;blush1;-;t6;-;-;t7;-;blush2;blush3;_;t2;t3;t4;t5;-;-;t8;t9;t10;t11", visTypeMouth: "[false,false,true,true,true,true,false,false,true,true,true,true,false,false]" },
+	  BFoxCZ: { visType: "t0;t1;-;-;;-;-;t12;t13;_;-;-;-;t6;t7;-;-;-;_;t2;t3;t4;t5;t8;t9;t10;t11", visTypeMouth: "[false,false,true,true,true,true,false,false,true,true,true,true,false,false]" }
+	};
+
+	function onOledAnimModeChange() {
+	  var m = document.getElementById("oledAnimMode").value;
+	  document.getElementById("visorLayoutWrap").style.display = (m == "1" || m == "2") ? "" : "none";
+	}
+	function onVisorLayoutChange() {
+	  document.getElementById("visorLayoutCustomWrap").style.display = (document.getElementById("visorLayout").value == "custom") ? "" : "none";
+	}
+
 	function saveConfig() {
-		var params = "boopEna="+document.getElementById("boop").checked+"&speechEna="+document.getElementById("speech").checked+"&tiltEna="+document.getElementById("tilt").checked+"&bleEna="+document.getElementById("ble").checked+"&oledEna="+document.getElementById("oled").checked+"&oledFlip="+document.getElementById("oledFlip").checked+"&inaEna="+document.getElementById("ina").checked;
+		var animMode = document.getElementById("oledAnimMode").value;
+		//The visor layout picker always starts blank on page load (its choice isn't round-tripped, only the
+		//resulting /visType.txt content is persisted). Blank simply means "leave the layout as whatever's
+		//already saved on the device" -- it must NOT block saving every other setting on every page reload.
+		//Only send visTypeStr/visTypeMouthStr (and thus overwrite the saved layout) if the user actually picked one now.
+		var visTypeStr = "", visTypeMouthStr = "";
+		var layout = document.getElementById("visorLayout").value;
+		if(layout != "") {
+		  if(layout == "custom") {
+		    visTypeStr = document.getElementById("visorLayoutCustom").value.trim();
+		    visTypeMouthStr = document.getElementById("visorLayoutMouthCustom").value.trim();
+		    if(visTypeStr == "" || visTypeMouthStr == "") {
+		      alert("Please fill in both custom visor layout fields, or set the visor layout back to '-- select --' to leave the current layout unchanged.");
+		      return;
+		    }
+		  } else {
+		    visTypeStr = visorPresets[layout].visType;
+		    visTypeMouthStr = visorPresets[layout].visTypeMouth;
+		  }
+		}
+		var params = "boopEna="+document.getElementById("boop").checked+"&speechEna="+document.getElementById("speech").checked+"&tiltEna="+document.getElementById("tilt").checked+"&bleEna="+document.getElementById("ble").checked+"&oledEna="+document.getElementById("oled").checked+"&oledFlip="+document.getElementById("oledFlip").checked+"&inaEna="+document.getElementById("ina").checked+"&oledAnimMode="+animMode;
+		if(visTypeStr != "") {
+		  params += "&visTypeStr="+encodeURIComponent(visTypeStr)+"&visTypeMouthStr="+encodeURIComponent(visTypeMouthStr);
+		}
 		var xhr = new XMLHttpRequest();
 		xhr.open("GET", "/saveconfig?"+params, true);
     xhr.onload = function() {

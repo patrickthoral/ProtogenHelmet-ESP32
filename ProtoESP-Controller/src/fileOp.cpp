@@ -28,6 +28,7 @@ void Config::setDefault() {
   oledEna = false;
   oledFlip = true;
   inaEna = false;
+  oledAnimMode = 0; //0 = text (animation name), 1 = animation (visor thumbnail), 2 = animation + text
   bEar = 60;
   bVisor = 100;
   bOled = 2;
@@ -67,6 +68,7 @@ bool Config::save() {
   doc["oledEna"] = oledEna;
   doc["oledFlip"] = oledFlip;
   doc["inaEna"] = inaEna;
+  doc["oledAnimMode"] = oledAnimMode;
   doc["bEar"] = bEar;
   doc["bVisor"] = bVisor;
   doc["bOled"] = bOled;
@@ -171,6 +173,7 @@ bool Config::load() {
   oledEna = doc["oledEna"].as<bool>();
   oledFlip = doc["oledFlip"].as<bool>();
   inaEna = doc["inaEna"].as<bool>();
+  oledAnimMode = doc["oledAnimMode"].as<int>();
   bEar = doc["bEar"].as<int>();
   bVisor = doc["bVisor"].as<int>();
   bOled = doc["bOled"].as<int>();

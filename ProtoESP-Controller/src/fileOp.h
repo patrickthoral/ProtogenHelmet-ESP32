@@ -22,7 +22,7 @@ private:
 class Config {
 public:
   bool boopEna, speechEna, tiltEna, bleEna, oledEna, oledFlip, inaEna;
-  int bEar,bVisor,bOled,rbSpeed,rbWidth,spMin,spMax,spTrig,fanDuty,boopThresh;
+  int bEar,bVisor,bOled,rbSpeed,rbWidth,spMin,spMax,spTrig,fanDuty,boopThresh,oledAnimMode; //oledAnimMode: 0=text, 1=animation, 2=animation+text
   float neutralX,neutralY,neutralZ,tiltX,tiltY,tiltZ,upX,upY,upZ,tiltTol;
   String aTilt,aUp,aBoop,visColorStr,wifiName = "ProtoWiFi",wifiPass = "Proto1234";
   unsigned long visColor;

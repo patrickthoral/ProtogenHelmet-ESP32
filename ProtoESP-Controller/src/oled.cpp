@@ -55,6 +55,52 @@ int SSDOLED::writeAnim(String anim) const {
   return width;
 }
 
+//--------------------------------//Visor thumbnail (draws whichever bitmap the caller passes in; the caller decides how often and from which frame)
+//showName: draws a small label of the animation name to the right of the thumbnail (top-left anchored instead of centered, to leave room for it) --
+//useful since on a 1-bit display some animations don't read clearly as a shape alone.
+bool SSDOLED::writeVisorThumb(uint64_t *leds, int8_t *segRow, int8_t *segCol, int segCount, int gridRows, int gridCols, bool showName, const String &name) const {
+  int width = gridCols * 8;
+  int height = gridRows * 8;
+  if(width > 128 || height > 32) return false; //doesn't fit, caller falls back to the text name (32, not 35: writeINA()'s box starts at y=32, so this avoids overlapping it)
+
+  int offX = showName ? 0 : (128 - width) / 2; //top-left anchored when showing the name, to leave room on the right for it
+  int offY = showName ? 0 : (32 - height) / 2;
+
+  u8g2.setDrawColor(0);
+  u8g2.drawBox(0, 0, 128, 32);
+  u8g2.setDrawColor(1);
+  for(int s = 0; s < segCount; s++) {
+    if(segRow[s] < 0) continue; //segment not placed by the layout
+    int baseX = offX + (segCol[s] * 8);
+    int baseY = offY + (segRow[s] * 8);
+    for(int r = 0; r < 8; r++) {
+      uint8_t rowBits = (leds[s] >> (r*8)) & 0xFF; //same byte/bit convention as setAllVisor() in main.cpp
+      if(rowBits == 0) continue;
+      for(int c = 0; c < 8; c++) {
+        if(bitRead(rowBits, c)) {
+          u8g2.drawPixel(baseX + c, baseY + r);
+        }
+      }
+    }
+  }
+  if(showName) {
+    const int padding = 3;
+    int areaX = offX + width + padding; //remaining space starts right after the thumbnail
+    int areaW = 128 - areaX - padding;
+    if(areaW > 6) { //only bother if there's reasonably enough room left for at least a couple characters
+      u8g2.setFont(u8g2_font_6x10_tr);
+      int textW = u8g2.getStrWidth(name.c_str());
+      int textX = areaX + max(0, (areaW - textW) / 2); //center horizontally in the remaining space
+      int fontHeight = u8g2.getAscent() - u8g2.getDescent();
+      int areaH = 32 - (2 * padding);
+      int textY = padding + u8g2.getAscent() + max(0, (areaH - fontHeight) / 2); //center vertically in the box
+      u8g2.drawStr(textX, textY, name.c_str());
+    }
+  }
+  u8g2.updateDisplayArea(0, 0, 16, 4);
+  return true;
+}
+
 //--------------------------------//INA Voltage & Current
 void SSDOLED::writeINA(float volt, float amp) const {
   u8g2.setDrawColor(0);

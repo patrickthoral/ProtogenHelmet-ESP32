@@ -122,6 +122,9 @@ AsyncWebServer server(80);
 bool instantReload = false, oledInitDone = false, tiltInitDone = false, getfilesProper = true, ToFInitDone = false, inaInitDone = false;
 uint8_t currentEarsFrame = 0, currentVisorFrame = 0, numOfSegm, numAnimBlush, totalAnims;
 uint16_t visorLedsNum = MATRIXESNUM*64;
+int8_t segGridRow[MATRIXESNUM], segGridCol[MATRIXESNUM]; //-1 = segment not placed by /visType.txt
+int gridRows = 0, gridCols = 0;
+bool visLayoutAvail = false;
 String currentAnim = "", animToLoad = "", availAnims[50], getfilesCache;
 float micDC = 800;
 
@@ -217,6 +220,53 @@ const std::vector<std::vector<int>> lookupDiag2 =
  {14,26,34,23,8},
  {13,25,24,9},
  {12,11,10}};
+
+//--------------------------------//Load visor segment grid layout (for OLED thumbnail), mirrors animator.html's createHTML() parsing of the same file
+void loadVisLayout() {
+  for(int i = 0; i < MATRIXESNUM; i++) { segGridRow[i] = -1; segGridCol[i] = -1; }
+  gridRows = 0;
+  gridCols = 0;
+
+  File file = LittleFS.open("/visType.txt", "r");
+  if(!file) {
+    logPrint(F("[E] No /visType.txt found, OLED will show the animation name as text"));
+    return;
+  }
+  String content = file.readString();
+  file.close();
+
+  int row = 0, col = 0, maxCol = 0, start = 0;
+  bool any = false;
+  for(int i = 0; i <= (int)content.length(); i++) {
+    if(i == (int)content.length() || content[i] == ';') {
+      String tok = content.substring(start, i);
+      start = i+1;
+      if(tok == "_") {
+        if(col > maxCol) maxCol = col;
+        row++;
+        col = 0;
+      } else {
+        if(tok.startsWith("t")) {
+          int idx = tok.substring(1).toInt();
+          if(idx >= 0 && idx < MATRIXESNUM) {
+            segGridRow[idx] = row;
+            segGridCol[idx] = col;
+            any = true;
+          }
+        } //"-" (empty) and "bN" (blush) cells just consume a grid column, same as animator.html
+        col++;
+      }
+    }
+  }
+  if(col > maxCol) maxCol = col; //account for the last row (no trailing "_")
+  gridRows = row+1;
+  gridCols = maxCol;
+
+  visLayoutAvail = any && (gridCols*8 <= 128) && (gridRows*8 <= 32); //32, not 35: writeVisorThumb()'s box must not overlap writeINA()'s box, which starts at y=32
+  if(!visLayoutAvail) {
+    logPrint(F("[E] /visType.txt layout empty or too large for the OLED, showing the animation name as text"));
+  }
+}
 
 //--------------------------------//Load functions
 bool loadAnim(String anim, String temp) {
@@ -314,7 +364,9 @@ bool loadAnim(String anim, String temp) {
     currentEarsFrame = 0;
 
     if(cfg.oledEna && oledInitDone) {
-      oled.writeAnim(anim.substring(0,anim.length()-5));
+      if(!cfg.oledAnimMode || !visLayoutAvail) { //Animation mode is live-updated by setAllVisor() itself; instantReload forces an immediate render
+        oled.writeAnim(anim.substring(0,anim.length()-5));
+      }
       oled.writeRGB(vTAcro[visorNow->type]);
     }
     return true;
@@ -429,6 +481,15 @@ void startWiFiWeb() {
     if(cfg.getBool(request, "oledFlip", cfg.oledFlip)) {
         if(cfg.oledEna && oledInitDone)
             oled.setFlip(cfg.oledFlip);
+    }
+    cfg.getInt(request, "oledAnimMode", cfg.oledAnimMode); //0=text, 1=animation, 2=animation+text
+    String visTypeStr, visTypeMouthStr;
+    if(cfg.getString(request, "visTypeStr", visTypeStr) && cfg.getString(request, "visTypeMouthStr", visTypeMouthStr) && visTypeStr.length() > 0 && visTypeMouthStr.length() > 0) {
+      File vtFile = LittleFS.open("/visType.txt", "w");
+      if(vtFile) { vtFile.print(visTypeStr); vtFile.close(); }
+      File vmFile = LittleFS.open("/visTypeMouth.txt", "w");
+      if(vmFile) { vmFile.print(visTypeMouthStr); vmFile.close(); }
+      loadVisLayout(); //re-parse immediately, no reboot needed
     }
     cfg.getBool(request, "inaEna", cfg.inaEna); //actual (re-)init happens in loop() via inaInitDone retry, no crash risk from reading before begin()
     //brightness
@@ -616,6 +677,8 @@ void setup() {
     while(1){};
   }
 
+  loadVisLayout();
+
   if(psramInit() && ESP.getFreePsram() != 0) {
     earsNow  = (AnimNowEars *)  ps_calloc(1, sizeof(AnimNowEars));
     visorNow = (AnimNowVisor *) ps_calloc(1, sizeof(AnimNowVisor));
@@ -746,7 +809,7 @@ String oldanim, boopoldanim;
 bool FdisplayVisor = false, FdisplayBlush = false, FdisplayEar = false, booping = false, wasTilt = false, boopRea = false, remoteSign = false, speaking = true;
 float zAx,yAx,finalMicAvg,avgMicArr[10], micAttack = 0.35f, micRelease = 0.2f, env = 0.0f;
 int boopRead, startIndex = 1, micVolume, currentMicAvg = 0, btnNum = 0, currFade = 1, apdsprox = 255;
-unsigned long lastMillsEars = 0, lastMillsVisor = 0, lastMillsTilt = 0, laskSpeakCheck = 0, lastMillsBoop = 0, lastFLED = 0, vaStatLast = 0, btnPressTime = 0, tiltChange = 0, check0button = 0, looptime = 0, fadeTime = 0, laskSpeakAnim = 0, lastBoopCheck = 0;
+unsigned long lastMillsEars = 0, lastMillsVisor = 0, lastMillsTilt = 0, laskSpeakCheck = 0, lastMillsBoop = 0, lastFLED = 0, vaStatLast = 0, btnPressTime = 0, tiltChange = 0, check0button = 0, looptime = 0, fadeTime = 0, laskSpeakAnim = 0, lastBoopCheck = 0, lastOledThumbUpdate = 0;
 
 void dynamicSpeak(uint64_t *leds, long colors[MATRIXESNUM][64], bool isMouth[MATRIXESNUM], int volume) {
   int mouthIndexes[MATRIXESNUM];
@@ -817,6 +880,14 @@ void setAllVisor(struct CRGB *ledArray, long ledColor, int visorFrame) {
     }
   }
   FdisplayVisor = true;
+
+  //live-mirror the OLED thumbnail from the exact bitmask just rendered (post-dynamicSpeak overlay, so mouth flap is included).
+  //Throttled: this function isn't uniformly rate-limited by its callers (the WS2812 rainbow branch calls it every loop() tick),
+  //so without this the OLED would get hammered over I2C. 60ms matches the existing speaking-redraw cadence used for this same effect elsewhere.
+  if(cfg.oledEna && oledInitDone && cfg.oledAnimMode && visLayoutAvail && lastOledThumbUpdate+60<=millis()) {
+    oled.writeVisorThumb(tempLeds, segGridRow, segGridCol, numOfSegm, gridRows, gridCols, cfg.oledAnimMode == 2, currentAnim.substring(0, currentAnim.length()-5));
+    lastOledThumbUpdate = millis();
+  }
 }
 
 void loop() {
