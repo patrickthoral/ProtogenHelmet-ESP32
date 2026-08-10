@@ -99,7 +99,7 @@ boolean Adafruit_APDS9960::begin(uint16_t iTimeMS, apds9960AGain_t aGain,
 
   /* Make sure we're actually connected */
   uint8_t x = read8(APDS9960_ID);
-  if (x != 0xAB && x != 0xA8) {
+  if (x != 0xAB && x != 0xA8 && x != 0xAA) { //0xAB = official, 0xA8/0xAA = known clone IDs
     return false;
   }
 

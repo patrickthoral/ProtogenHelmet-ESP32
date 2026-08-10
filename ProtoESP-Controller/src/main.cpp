@@ -34,6 +34,8 @@ bool useRGBblush = true; //Swaps red-green for RGB strip
 
 #define oledAddr 60 //define oled on address 0x3c
 
+#define DEBUG_LOGS 0 //set to 1 to enable verbose debug logPrint() calls (e.g. sensor value dumps) for troubleshooting; 0 compiles them out entirely (no rebuild-free toggle, flip this and reflash)
+
 //--------------------------------//No touching after this!
 
 #include <Arduino.h>
@@ -79,6 +81,18 @@ Adafruit_INA219 ina219;
 #include "Adafruit_APDS9960.h"
 Adafruit_APDS9960 apds;
 
+//Diagnostic: read the APDS9960 ID register directly, bypassing the library's begin()/ID whitelist --
+//useful to see what a clone chip actually reports if init keeps failing. The vendored library here
+//already accepts both 0xAB (official) and 0xA8 (a known clone ID), so a failure despite that means
+//either the chip isn't ACKing on the I2C bus at all (wiring/address/power), or it's a third clone ID.
+uint8_t apdsRawID() {
+  Wire.beginTransmission(0x39); //APDS9960_ADDRESS
+  Wire.write(0x92); //APDS9960_ID register
+  if(Wire.endTransmission(false) != 0) return 0xFF; //no ACK, not a real reading
+  Wire.requestFrom((uint8_t)0x39, (uint8_t)1);
+  return Wire.available() ? Wire.read() : 0xFF;
+}
+
 #include "Adafruit_VL53L1X.h"
 Adafruit_VL53L1X vl53;
 
@@ -110,6 +124,12 @@ inline void logPrint(const __FlashStringHelper *str) {
 void logPrint(const String &str) {
     logPrint(str.c_str());
 }
+
+#if DEBUG_LOGS
+  #define logDebug(x) logPrint(x)
+#else
+  #define logDebug(x) //compiled out entirely -- the argument (e.g. a String concatenation) isn't even evaluated
+#endif
 
 //--------------------------------//web / wifi
 #include "WiFi.h"
@@ -770,7 +790,7 @@ void setup() {
   if(boopMode == "APDS9960" && cfg.boopEna) {
     if(!apds.begin()){
       cfg.boopEna = false;
-      logPrint(F("[E] An Error has occurred while initializing APDS9960 chip!"));
+      logPrint("[E] An Error has occurred while initializing APDS9960 chip! (raw ID reg: 0x"+String(apdsRawID(),HEX)+")");
     } else {
       ToFInitDone = true;
       apds.enableProximity(true);
@@ -808,8 +828,8 @@ void setup() {
 String oldanim, boopoldanim;
 bool FdisplayVisor = false, FdisplayBlush = false, FdisplayEar = false, booping = false, wasTilt = false, boopRea = false, remoteSign = false, speaking = true;
 float zAx,yAx,finalMicAvg,avgMicArr[10], micAttack = 0.35f, micRelease = 0.2f, env = 0.0f;
-int boopRead, startIndex = 1, micVolume, currentMicAvg = 0, btnNum = 0, currFade = 1, apdsprox = 255;
-unsigned long lastMillsEars = 0, lastMillsVisor = 0, lastMillsTilt = 0, laskSpeakCheck = 0, lastMillsBoop = 0, lastFLED = 0, vaStatLast = 0, btnPressTime = 0, tiltChange = 0, check0button = 0, looptime = 0, fadeTime = 0, laskSpeakAnim = 0, lastBoopCheck = 0, lastOledThumbUpdate = 0;
+int boopRead, startIndex = 1, micVolume, currentMicAvg = 0, btnNum = 0, currFade = 1, apdsprox = 255, apdsLastProx = -1;
+unsigned long lastMillsEars = 0, lastMillsVisor = 0, lastMillsTilt = 0, laskSpeakCheck = 0, lastMillsBoop = 0, lastFLED = 0, vaStatLast = 0, btnPressTime = 0, tiltChange = 0, check0button = 0, looptime = 0, fadeTime = 0, laskSpeakAnim = 0, lastBoopCheck = 0, lastOledThumbUpdate = 0, lastProxDebug = 0, apdsLastChange = 0;
 
 void dynamicSpeak(uint64_t *leds, long colors[MATRIXESNUM][64], bool isMouth[MATRIXESNUM], int volume) {
   int mouthIndexes[MATRIXESNUM];
@@ -1154,7 +1174,24 @@ void loop() {
     } else if (boopMode == "APDS9960") {
       if(ToFInitDone) {
         apdsprox = apds.readProximity();
-        //Serial.println(String(apdsprox));
+        apds.clearInterrupt(); //clears the proximity/color saturation latch (PGSAT/CPSAT) every cycle -- left uncleared, a saturation event can wedge some clone chips' proximity engine until reset
+        if(lastProxDebug+500<=millis()) { //throttled: readProximity() runs every loop() iteration, would flood the console otherwise
+          logDebug("[D] APDS proximity: "+String(apdsprox)+", ToF: "+String(255-apdsprox)); //ToF = 255-proximity, matches the /tof webpage value
+          lastProxDebug = millis();
+        }
+        if(apdsprox != apdsLastProx) {
+          apdsLastProx = apdsprox;
+          apdsLastChange = millis();
+        } else if(millis()-apdsLastChange > 5000) { //reading hasn't moved at all in 5s -- real sensor noise never holds this still; treat it as wedged and recover
+          logPrint(F("[E] APDS9960 proximity reading appears stuck, re-initializing..."));
+          if(apds.begin()) {
+            apds.enableProximity(true);
+            apds.setProxPulse(APDS9960_PPULSELEN_8US, 8);
+          } else {
+            ToFInitDone = false; //hand off to the existing retry-until-successful path below
+          }
+          apdsLastChange = millis();
+        }
         if(booping == false && (255 - apdsprox) < cfg.boopThresh) {
           logPrint(F("[I] ToF BOOP"));
           booping = true;
@@ -1171,7 +1208,7 @@ void loop() {
       } else {
         if(!apds.begin()){
           cfg.boopEna = false;
-          logPrint(F("[E] An Error has occurred while initializing APDS9960 chip!"));
+          logPrint("[E] An Error has occurred while initializing APDS9960 chip! (raw ID reg: 0x"+String(apdsRawID(),HEX)+")");
         } else {
           ToFInitDone = true;
           apds.enableProximity(true);
