@@ -99,6 +99,10 @@
           <input type="number" name="spTrig" min="2" max="100">
           <label for="boopThresh">Boop distance threshold <sup onclick="alert('Range: 1-250\nDefault: 15')">&#9432;</sup></label>
           <input type="number" name="boopThresh" min="1" max="250">
+          <label for="startMsg1">Startup message line 1 <sup onclick="alert('Default: WELCOME\nShown on the visor at boot after PROTOGEN OK, one character per matrix (up to 11), shorter lines are centered.\nLetters, digits, spaces and symbols only. Leave empty to skip the line.\nApplied at the next boot.')">&#9432;</sup></label>
+          <input type="text" name="startMsg1" maxlength="11" pattern="[ -~]*">
+          <label for="startMsg2">Startup message line 2 <sup onclick="alert('Default: USER\nSame as line 1, shown after it.')">&#9432;</sup></label>
+          <input type="text" name="startMsg2" maxlength="11" pattern="[ -~]*">
           <label for="aTilt">Tilt sideways animation <sup onclick="alert('Default: confused.json')">&#9432;</sup></label>
           <select id="aTilt" name="aTilt"></select>
           <label for="aUp">Tilt up animation <sup onclick="alert('Default: upset.json')">&#9432;</sup></label>
@@ -383,6 +387,8 @@
         document.getElementsByName("wifiPass")[0].value = obj.wifiPass;
         document.getElementById("fanspeed").value = obj.fanDuty;
         document.getElementsByName("boopThresh")[0].value = obj.boopThresh;
+        document.getElementsByName("startMsg1")[0].value = obj.startMsg1 !== undefined ? obj.startMsg1 : "WELCOME"; //older config.json without these keys
+        document.getElementsByName("startMsg2")[0].value = obj.startMsg2 !== undefined ? obj.startMsg2 : "USER";
   }
 
 	function loadConfig() {

@@ -54,6 +54,8 @@ void Config::setDefault() {
   visColor = strtol(visColorStr.c_str()+1, NULL, 16);
   wifiName = "ProtoWiFi";
   wifiPass = "Proto1234";
+  startMsg1 = "WELCOME";
+  startMsg2 = "USER";
   fanDuty = 255;
   boopThresh = 15;
   save();
@@ -93,6 +95,8 @@ bool Config::save() {
   doc["visColor"] = visColorStr;
   doc["wifiName"] = wifiName;
   doc["wifiPass"] = wifiPass;
+  doc["startMsg1"] = startMsg1;
+  doc["startMsg2"] = startMsg2;
   doc["fanDuty"] = fanDuty;
   doc["boopThresh"] = boopThresh;
   
@@ -199,6 +203,8 @@ bool Config::load() {
   visColor = strtol(visColorStr.c_str()+1, NULL, 16);
   wifiName = doc["wifiName"].as<String>();
   wifiPass = doc["wifiPass"].as<String>();
+  startMsg1 = doc["startMsg1"] | "WELCOME"; //older config.json without these keys gets the defaults
+  startMsg2 = doc["startMsg2"] | "USER";
   fanDuty = doc["fanDuty"].as<int>();
   boopThresh = doc["boopThresh"].as<int>();
 

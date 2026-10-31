@@ -28,6 +28,8 @@
   "upZ":0.11,
   "tiltTol":0.1,
   "visColor":"#ff0000",
+  "startMsg1":"WELCOME",
+  "startMsg2":"USER",
   "wifiName":"ProtoWiFi",
   "wifiPass":"Proto1234",
   "fanDuty": 255,

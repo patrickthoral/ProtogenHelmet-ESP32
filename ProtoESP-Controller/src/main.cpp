@@ -42,8 +42,7 @@ bool useRGBblush = true; //Swaps red-green for an RGB-ordered blush strip; false
 
 #define POST_ENABLED 1 //LED power-on self test: walks a pixel through every visor matrix in parallel and down the ears/blush chain, once per color (white, red, green, blue) at boot, then resumes normally. Takes ~9s, set to 0 to skip
 #define POST_STEP_MS 5 //extra delay per POST pixel step (pushing the 704-LED visor already takes ~21ms on its own)
-#define STARTUP_OK_MSG "PROTOGEN OK" //shown once every module initialized fine; otherwise each failed module is shown in red instead (e.g. "OLED ERR")
-#define STARTUP_MSG {"WELCOME", "USER"} //lines shown one after another after that, one character per matrix in chain order (up to MATRIXESNUM chars per line, shorter lines are centered). {""} for none
+#define STARTUP_OK_MSG "PROTOGEN OK" //shown once every module initialized fine; otherwise each failed module is shown in red instead (e.g. "OLED ERR"). The lines after it are set in the web UI (startMsg1/2)
 #define STARTUP_MSG_MS 3000 //how long each startup message line stays up
 #define POST_BLINK_MS 250 //onboard LED blinks the walk color on/off at this interval during the POST
 #define HEARTBEAT_BPM 12 //onboard LED breaths per minute (12 = one every 5s)
@@ -616,6 +615,19 @@ void startWiFiWeb() {
     }
     //boop threshold
     cfg.getInt(request, "boopThresh", cfg.boopThresh);
+    //startup message lines: one character per matrix, and only printable ASCII (the visor font has no UTF-8), shown at the next boot
+    String *msgLines[] = {&cfg.startMsg1, &cfg.startMsg2};
+    const char *msgParams[] = {"startMsg1", "startMsg2"};
+    for(uint8_t i = 0; i < 2; i++) {
+      String msg;
+      if(cfg.getString(request, msgParams[i], msg)) {
+        String clean;
+        for(uint16_t c = 0; c < msg.length() && clean.length() < MATRIXESNUM; c++) {
+          if(msg[c] >= ' ' && msg[c] <= '~') { clean += msg[c]; }
+        }
+        *msgLines[i] = clean;
+      }
+    }
     delay(25);
     if(cfg.save()) {
       instantReload = true;
@@ -930,9 +942,9 @@ void showMsgLine(const char *msg, CRGB color) {
 }
 
 //Runs at the end of setup(), once every module has been initialized: STARTUP_OK_MSG in green if all of them came up, otherwise one red line per failed module,
-//then the STARTUP_MSG lines in the visor color (cfg.visColor). The last line stays up until the first animation frame replaces (fades over) it.
+//then the startup message lines from the config (web UI) in the visor color (cfg.visColor), empty lines skipped. The last line stays up until the first animation frame replaces (fades over) it.
 void showStartupMsg() {
-  const char *lines[] = STARTUP_MSG;
+  const String lines[] = {cfg.startMsg1, cfg.startMsg2};
   if(visorType != "WS2812") { return; }
 
   mx.setFont(_sysfont); //normally set by mx.begin(), which only runs for MAX72XX visors; getChar() itself needs no MAX72XX hardware
@@ -942,7 +954,7 @@ void showStartupMsg() {
     for(uint8_t i = 0; i < initErrorNum; i++) { showMsgLine(initErrors[i], CRGB::Red); }
   }
   CRGB color = cfg.visColor ? CRGB((uint32_t)cfg.visColor) : CRGB::White; //same color as the visor
-  for(const char *msg : lines) { showMsgLine(msg, color); }
+  for(const String &msg : lines) { showMsgLine(msg.c_str(), color); }
 }
 
 //--------------------------------//Setup
