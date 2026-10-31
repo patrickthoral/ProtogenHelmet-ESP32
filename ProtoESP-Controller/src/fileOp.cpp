@@ -28,7 +28,7 @@ void Config::setDefault() {
   oledEna = false;
   oledFlip = true;
   inaEna = false;
-  oledAnimMode = 0; //0 = text (animation name), 1 = animation (visor thumbnail), 2 = animation + text
+  oledAnimMode = 1; //0 = text (animation name), 1 = animation (visor thumbnail), 2 = animation + text
   bEar = 60;
   bVisor = 100;
   bOled = 2;
@@ -171,9 +171,9 @@ bool Config::load() {
   tiltEna = doc["tiltEna"].as<bool>();
   bleEna = doc["bleEna"].as<bool>();
   oledEna = doc["oledEna"].as<bool>();
-  oledFlip = doc["oledFlip"].as<bool>();
+  oledFlip = doc["oledFlip"] | true; //"| default": an older config.json without these keys gets the default instead of false/0
   inaEna = doc["inaEna"].as<bool>();
-  oledAnimMode = doc["oledAnimMode"].as<int>();
+  oledAnimMode = doc["oledAnimMode"] | 1;
   bEar = doc["bEar"].as<int>();
   bVisor = doc["bVisor"].as<int>();
   bOled = doc["bOled"].as<int>();

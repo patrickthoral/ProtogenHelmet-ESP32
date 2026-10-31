@@ -67,7 +67,7 @@ public:
   void writeSet(int) const;
   int writeAnim(String) const;
   bool writeVisorThumb(uint64_t*, int8_t*, int8_t*, int, int, int, bool, const String&) const;
-  void writeINA(float,float) const;
+  void writeINA(float,float,bool) const;
   void writeRGB(String) const;
   void speak(bool) const;
   void remote(bool) const;

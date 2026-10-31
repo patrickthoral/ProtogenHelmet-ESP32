@@ -23,6 +23,7 @@ bool SSDOLED::init(uint8_t oledAddr, int brightness, bool INA, bool flip) {
   byte error = Wire.endTransmission();
   if(error == 0) {
     u8g2.setI2CAddress(oledAddr*2);
+    u8g2.setBusClock(Wire.getClock()); //U8g2 calls Wire.setClock() before every transfer (SSD1306 default 400kHz), which would override main.cpp's I2C_CLOCK for the whole bus
     u8g2.begin();
     u8g2.setFlipMode(flip ? 1 : 0);
     oledBright(brightness);
@@ -102,13 +103,13 @@ bool SSDOLED::writeVisorThumb(uint64_t *leds, int8_t *segRow, int8_t *segCol, in
 }
 
 //--------------------------------//INA Voltage & Current
-void SSDOLED::writeINA(float volt, float amp) const {
+void SSDOLED::writeINA(float volt, float amp, bool ok) const {
   u8g2.setDrawColor(0);
   u8g2.drawBox(0, 32, 128, 13); //0-128 ; 32-45
   u8g2.setDrawColor(1);
-  String toShow = String(volt,2)+"V "+String(amp/1000,2)+"A";
+  String toShow = ok ? String(volt,2)+"V "+String(amp/1000,2)+"A" : String("INA ERR"); //ok = false: the I2C read of the INA219 failed
+  u8g2.setFont(u8g2_font_t0_22b_tr); //before getStrWidth(), so the centering uses this font's width
   float width = u8g2.getStrWidth(toShow.c_str());
-  u8g2.setFont(u8g2_font_t0_22b_tr);
   u8g2.drawStr((128 - width) / 2, 45, toShow.c_str());
   u8g2.updateDisplayArea(0, 4, 16, 2);
 }

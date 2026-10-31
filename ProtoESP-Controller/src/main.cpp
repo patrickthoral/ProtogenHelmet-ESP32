@@ -4,9 +4,14 @@
 #define T_in 2 //Output from Touch Sensor (for KY-032, Capac)
 #define T_en 42 //Enable pin to Touch Sensor (for KY-032)
 #define DATA_PIN_EARS 5  //Ears(Blush) (from outer to inner, POV-right cheek, (if blush: from top to bottom, right cheek nearest to ear first))
+#ifndef DATA_PIN_VISOR //can be overridden per board from platformio.ini (build_flags)
 #define DATA_PIN_VISOR 7 //Face (right cheek, left segment of eye first)
+#endif
 #define I2C_SDA 8 //SDA for Gyro, OLED, INA219, ToF
 #define I2C_SCL 9 //SCL for Gyro, OLED, INA219, ToF
+#ifndef I2C_CLOCK //can be overridden per board from platformio.ini (build_flags)
+#define I2C_CLOCK 400000 //I2C bus speed in Hz
+#endif
 #define MAX_CLK 12 //Clock for MAX72xx matrixes if used
 #define MAX_MOSI 11 //Data for MAX72xx matrixes if used
 #define MAX_CS 10 //ChipSelect for MAX72xx matrixes if used
@@ -77,6 +82,38 @@ LSM6DS3 myIMU;
 
 #include <Adafruit_INA219.h> //edited library in this sketch (replace 0.1R with 0.03R resistor on the board)
 Adafruit_INA219 ina219;
+#define INA_CAL_VALUE 5572 //must match ina219_calValue in setCalibration_16V_8A()
+#define INA_CURRENT_DIVIDER_MA 4 //must match ina219_currentDivider_mA in setCalibration_16V_8A()
+#define INA_CONFIG_VALUE (INA219_CONFIG_BVOLTAGERANGE_16V | INA219_CONFIG_GAIN_8_320MV | INA219_CONFIG_BADCRES_12BIT | INA219_CONFIG_SADCRES_12BIT_1S_532US | INA219_CONFIG_MODE_SANDBVOLT_CONTINUOUS) //must match setCalibration_16V_8A()
+uint32_t inaResets = 0;
+
+//INA219 register access that bypasses the library's reads: those ignore I2C errors (a failed read converts an uninitialized value) and
+//getCurrent_mA() rewrites the calibration before every read. Here the pointer write and the read are separate transactions with a STOP in
+//between, with retries, so a marginal connection (a loose INA219 GND caused Error -1 reads and constant resets) shows up as INA ERR instead.
+bool inaRead16(uint8_t reg, uint16_t &value) {
+  for(int attempt = 0; attempt < 3; attempt++) {
+    Wire.beginTransmission(INA219_ADDRESS);
+    Wire.write(reg);
+    if(Wire.endTransmission() != 0) continue;
+    if(Wire.requestFrom((uint8_t)INA219_ADDRESS, (uint8_t)2) == 2) {
+      value = Wire.read() << 8;
+      value |= Wire.read();
+      return true;
+    }
+  }
+  return false;
+}
+
+bool inaWrite16(uint8_t reg, uint16_t value) {
+  for(int attempt = 0; attempt < 3; attempt++) {
+    Wire.beginTransmission(INA219_ADDRESS);
+    Wire.write(reg);
+    Wire.write(value >> 8);
+    Wire.write(value & 0xFF);
+    if(Wire.endTransmission() == 0) return true;
+  }
+  return false;
+}
 
 #include "Adafruit_APDS9960.h"
 Adafruit_APDS9960 apds;
@@ -242,18 +279,23 @@ const std::vector<std::vector<int>> lookupDiag2 =
  {12,11,10}};
 
 //--------------------------------//Load visor segment grid layout (for OLED thumbnail), mirrors animator.html's createHTML() parsing of the same file
+const char DEFAULT_VIS_LAYOUT[] = "t0;t1;-;-;-;t9;t10;_;blush0;blush1;-;t5;-;blush2;blush3;_;t2;t3;t4;-;t6;t7;t8"; //animator.html's "M16 mk2" preset (11 segments, 4 blush), used when /visType.txt is missing or empty
 void loadVisLayout() {
   for(int i = 0; i < MATRIXESNUM; i++) { segGridRow[i] = -1; segGridCol[i] = -1; }
   gridRows = 0;
   gridCols = 0;
 
+  String content;
   File file = LittleFS.open("/visType.txt", "r");
-  if(!file) {
-    logPrint(F("[E] No /visType.txt found, OLED will show the animation name as text"));
-    return;
+  if(file) {
+    content = file.readString();
+    file.close();
   }
-  String content = file.readString();
-  file.close();
+  content.trim();
+  if(content.length() == 0) {
+    logPrint(F("[I] No /visType.txt found, using the built-in M16 mk2 layout for the OLED thumbnail"));
+    content = DEFAULT_VIS_LAYOUT;
+  }
 
   int row = 0, col = 0, maxCol = 0, start = 0;
   bool any = false;
@@ -755,7 +797,13 @@ void setup() {
   //I2C things
   Wire.setPins(I2C_SDA, I2C_SCL);
   Wire.begin();
-  Wire.setClock(400000); //100k = 113ms; 400k = 33ms; (800k = 20ms; 1mhz / 2mhz = 17ms = breaks apds)
+  Wire.setClock(I2C_CLOCK); //100k = 113ms; 400k = 33ms; (800k = 20ms; 1mhz / 2mhz = 17ms = breaks apds)
+  String i2cFound; //boot-time bus scan, so the log shows which devices actually ACK (OLED 0x3C, APDS9960 0x39, VL53L1X 0x29, INA219 0x40, LSM6DS3 0x6A/0x6B)
+  for(uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if(Wire.endTransmission() == 0) i2cFound += " 0x"+String(addr,HEX);
+  }
+  logPrint("[I] I2C devices found:"+(i2cFound.length() ? i2cFound : String(" none"))+" @ "+String(Wire.getClock()/1000)+"kHz");
 
   if(cfg.tiltEna) {
     if(myIMU.begin()) {
@@ -1262,7 +1310,19 @@ void loop() {
   if(cfg.oledEna && oledInitDone && vaStatLast+1000<millis()) {
     //looptime = micros();
     if(cfg.inaEna && inaInitDone) {
-      oled.writeINA(ina219.getBusVoltage_V(),ina219.getCurrent_mA());
+      uint16_t cal = 0, rawCurrent = 0, rawBus = 0;
+      bool inaOk = inaRead16(INA219_REG_CALIBRATION, cal);
+      if(inaOk && cal != INA_CAL_VALUE) { //the INA219 reset (power-on default: calibration 0, config 0x399F), so the current reads 0 until both are restored
+        inaResets++;
+        logPrint("[E] INA219 reset detected (calibration "+String(cal)+"), restoring config; "+String(inaResets)+" resets since boot, check its VCC/GND wiring");
+        inaWrite16(INA219_REG_CONFIG, INA_CONFIG_VALUE);
+        inaWrite16(INA219_REG_CALIBRATION, INA_CAL_VALUE);
+        delay(2); //the current register is only recalculated at the end of the next conversion (532us shunt + 532us bus)
+      }
+      inaOk = inaOk && inaRead16(INA219_REG_CURRENT, rawCurrent) && inaRead16(INA219_REG_BUSVOLTAGE, rawBus);
+      float currentMA = (int16_t)rawCurrent / (float)INA_CURRENT_DIVIDER_MA;
+      float busV = (rawBus >> 3) * 4 * 0.001f; //drop CNVR and OVF, 4mV per bit
+      oled.writeINA(busV,currentMA,inaOk);
     }
     if(cfg.bleEna) {
       if(pServer->getConnectedCount() == 0) {

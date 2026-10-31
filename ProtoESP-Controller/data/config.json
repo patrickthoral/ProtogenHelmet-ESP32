@@ -4,6 +4,8 @@
   "tiltEna":false,
   "bleEna":true,
   "oledEna":true,
+  "oledFlip":true,
+  "oledAnimMode":1,
   "bEar":64,
   "bVisor":5,
   "bOled":2,
