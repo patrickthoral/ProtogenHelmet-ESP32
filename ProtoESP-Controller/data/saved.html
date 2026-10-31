@@ -8,15 +8,25 @@
     <main>
       <div>
         <h1>Saved/changed OK</h1>
-        <h3>Redirecting in 1s</h3>
+        <h3 id="info">Redirecting in 1s</h3>
         <script>
-          var timer = setTimeout(function() {
-            if(window.location.href.includes("main")) {
-              window.location='/';
-            } else if (window.location.href.includes("anim")) {
-              window.location='/animator.html';
-            }
-          }, 1000);
+          var delay = 1000;
+          if(window.location.href.includes("restart")) { //WiFi SSID/password changed: the board restarts and this connection drops, so no redirect
+            document.getElementById("info").innerText = "WiFi changed, the board is restarting. Reconnect to the new network, then open this page again.";
+            delay = -1;
+          } else if(window.location.href.includes("wifiinvalid")) {
+            document.getElementById("info").innerText = "WiFi not changed: the SSID needs 1-32 and the password 8-63 characters. Everything else was saved. Redirecting in 4s";
+            delay = 4000;
+          }
+          if(delay >= 0) {
+            var timer = setTimeout(function() {
+              if(window.location.href.includes("main")) {
+                window.location='/';
+              } else if (window.location.href.includes("anim")) {
+                window.location='/animator.html';
+              }
+            }, delay);
+          }
         </script>
       </div>
     </main>

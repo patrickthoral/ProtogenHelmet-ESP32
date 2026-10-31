@@ -187,6 +187,7 @@ void logPrint(const String &str) {
 AsyncWebServer server(80);
 
 //--------------------------------//Config vars
+unsigned long restartAt = 0; //set by the web UI when a change needs a reboot (WiFi SSID/password), loop() restarts once the response has gone out
 bool instantReload = false, oledInitDone = false, tiltInitDone = false, getfilesProper = true, ToFInitDone = false, inaInitDone = false;
 uint8_t currentEarsFrame = 0, currentVisorFrame = 0, numOfSegm, numAnimBlush, totalAnims;
 uint16_t visorLedsNum = MATRIXESNUM*64;
@@ -600,15 +601,31 @@ void startWiFiWeb() {
     //RGB visor color
     if(cfg.getString(request, "visColor", cfg.visColorStr))
         cfg.visColor = strtol(cfg.visColorStr.c_str() + 1, NULL, 16);
-    //wifi
-    cfg.getString(request, "wifiName", cfg.wifiName);
-    cfg.getString(request, "wifiPass", cfg.wifiPass);
+    //wifi: only accept what WiFi.softAP() can start with (an empty password would also make it an open network), otherwise keep the old ones.
+    //softAP() only runs at boot, so a change is applied by a restart after the response
+    String newName = cfg.wifiName, newPass = cfg.wifiPass;
+    cfg.getString(request, "wifiName", newName);
+    cfg.getString(request, "wifiPass", newPass);
+    bool wifiValid = newName.length() >= 1 && newName.length() <= 32 && newPass.length() >= 8 && newPass.length() <= 63;
+    bool wifiChanged = wifiValid && (newName != cfg.wifiName || newPass != cfg.wifiPass);
+    if(wifiValid) {
+      cfg.wifiName = newName;
+      cfg.wifiPass = newPass;
+    } else {
+      logPrint(F("[E] Invalid WiFi SSID (1-32 characters) or password (8-63 characters), keeping the old ones"));
+    }
     //boop threshold
     cfg.getInt(request, "boopThresh", cfg.boopThresh);
     delay(25);
     if(cfg.save()) {
       instantReload = true;
-      request->redirect("/saved.html?main");
+      if(wifiChanged) {
+        logPrint(F("[I] WiFi SSID/password changed, restarting to apply"));
+        restartAt = millis() + 2000;
+        request->redirect("/saved.html?main&restart");
+      } else {
+        request->redirect(wifiValid ? "/saved.html?main" : "/saved.html?main&wifiinvalid");
+      }
     } else {
       request->send(200, "text/plain", F("Saving config failed!"));
     }
@@ -1232,6 +1249,7 @@ bool handleSelfTest() {
 void loop() {
   ElegantOTA.loop();
   updateHeartbeat(); //onboard LED breathes as long as loop() keeps running
+  if(restartAt && millis() > restartAt) { ESP.restart(); } //before the self test check, which skips the rest of loop()
   if(handleSelfTest()) { return; }
   //--------------------------------//EAR Leds render
   if(earPresent) {

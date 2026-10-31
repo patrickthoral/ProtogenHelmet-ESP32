@@ -105,10 +105,10 @@
           <select id="aUp" name="aUp"></select>
           <label for="aBoop">Boop animation <sup onclick="alert('Default: boop.json')">&#9432;</sup></label>
           <select id="aBoop" name="aBoop"></select>
-          <label for="wifiName">WiFi AP SSID <sup onclick="alert('Default: ProtoWiFi\nChange this so other people remotes don\'t connect to your protogen if multiple people running ProtoESP are at the same place!')">&#9432;</sup></label>
-          <input type="text" name="wifiName" minlength="9">
-          <label for="wifiPass">WiFi AP Password <sup onclick="alert('Default: Proto1234\nSame applies here as for the SSID!')">&#9432;</sup></label>
-          <input type="text" name="wifiPass" minlength="9"><br>
+          <label for="wifiName">WiFi AP SSID <sup onclick="alert('Default: ProtoWiFi\n1-32 characters, also used as the Bluetooth name\nChange this so other people remotes don\'t connect to your protogen if multiple people running ProtoESP are at the same place!\nThe board restarts to apply a change, reconnect to the new network afterwards.')">&#9432;</sup></label>
+          <input type="text" name="wifiName" required minlength="1" maxlength="32">
+          <label for="wifiPass">WiFi AP Password <sup onclick="alert('Default: Proto1234\n8-63 characters (WPA2)\nSame applies here as for the SSID!\nThe board restarts to apply a change, reconnect to the new network afterwards.')">&#9432;</sup></label>
+          <input type="text" name="wifiPass" required minlength="8" maxlength="63"><br>
           <button type="submit">Save config</button>
         </form>
       </div>
