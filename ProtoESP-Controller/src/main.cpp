@@ -17,6 +17,7 @@
 #define MAX_CS 10 //ChipSelect for MAX72xx matrixes if used
 #define animBtn 4 //Pulling this pin LOW cycles through animations
 #define fanPWM 13 //PWM pin to control 4pin fan
+#define ONBOARD_LED_PIN 21 //Onboard WS2812, used as a heartbeat so you can see the ESP32 hasn't crashed
 
 #define visorType "WS2812" // What displays are you using? (WS2812 or MAX72XX so far)
 #define HARDWARE_TYPE MD_MAX72XX::FC16_HW //flip up-down: ::DR1CR0RR1_HW , flip left-right: ::PAROLA_HW , flip both: ::ICSTATION_HW
@@ -28,7 +29,7 @@ bool earPresent = false; // Are you using ear leds?
 
 bool blushPresent = false; // Are you using blush leds?
 #define blushLedsNum 8 // How many? (might crash under 8)
-bool useRGBblush = true; //Swaps red-green for RGB strip
+bool useRGBblush = true; //Swaps red-green for an RGB-ordered blush strip; false for regular GRB WS2812 blush LEDs (check with the POST: the red pass must show red on the blush too)
 
 
 #define boopMode "APDS9960" //"KY-032" for KY-032, "Capac" for capacitive sensor/boop when HIGH, "APDS9960" for ADPS9960, "VL53L1X" for VL53L1X, leave empty for none
@@ -38,6 +39,16 @@ bool useRGBblush = true; //Swaps red-green for RGB strip
 #define oldMatrixFix false //fix for Legacy WS2812B-2020 matrix
 
 #define oledAddr 60 //define oled on address 0x3c
+
+#define POST_ENABLED 1 //LED power-on self test: walks a pixel through every visor matrix in parallel and down the ears/blush chain, once per color (white, red, green, blue) at boot, then resumes normally. Takes ~9s, set to 0 to skip
+#define POST_STEP_MS 5 //extra delay per POST pixel step (pushing the 704-LED visor already takes ~21ms on its own)
+#define STARTUP_OK_MSG "PROTOGEN OK" //shown once every module initialized fine; otherwise each failed module is shown in red instead (e.g. "OLED ERR")
+#define STARTUP_MSG {"WELCOME", "USER"} //lines shown one after another after that, one character per matrix in chain order (up to MATRIXESNUM chars per line, shorter lines are centered). {""} for none
+#define STARTUP_MSG_MS 3000 //how long each startup message line stays up
+#define POST_BLINK_MS 250 //onboard LED blinks the walk color on/off at this interval during the POST
+#define HEARTBEAT_BPM 12 //onboard LED breaths per minute (12 = one every 5s)
+#define HEARTBEAT_COLOR CRGB::Blue //single subpixel only
+#define HEARTBEAT_MAX 8 //peak brightness of the onboard LED (0-255; it is very bright, keep this low). Breathes from fully off up to this
 
 #define DEBUG_LOGS 0 //set to 1 to enable verbose debug logPrint() calls (e.g. sensor value dumps) for troubleshooting; 0 compiles them out entirely (no rebuild-free toggle, flip this and reflash)
 
@@ -60,7 +71,7 @@ ezButton hwBtn(animBtn);
 #include <sstream>
 #define FASTLED_ESP8266_RAW_PIN_ORDER
 //#define FASTLED_RMT5 = 0 //doesnt compile
-#define FASTLED_ESP32_FLASH_LOCK 1
+//FASTLED_ESP32_FLASH_LOCK is set in platformio.ini's build_flags: it's used by FastLED's own idf4_rmt_impl.cpp, which never sees a #define in this file
 #include <FastLED.h>
 #define ARDUINOJSON_USE_DOUBLE 0
 #include <ArduinoJson.h>
@@ -244,6 +255,9 @@ CRGB visorLedsNEW[MATRIXESNUM*64];
 CRGB c2Leds[earLedsNum+blushLedsNum];
 
 CLEDController *ledController[2];
+CRGB onboardLed[1];
+uint8_t onboardBrightness = 0;
+bool pushLeds = false; //set when any LED buffer changed; loop() pushes everything once via showAllLeds()
 
 CRGB pixelBuffer[18];
 CRGB visorPixelBuffer[10];
@@ -717,9 +731,213 @@ void startWiFiWeb() {
   ElegantOTA.setAutoReboot(true);
 }
 
+//--------------------------------//LED output
+//Onboard WS2812, bit-banged instead of being a 3rd FastLED controller: on the S3 FastLED's RMT driver only runs 2 controllers at once (FASTLED_RMT_MEM_BLOCKS 2
+//of the 4 channels), so a 3rd one gets started from inside the RMT interrupt (doneOnChannel -> startNext), which calls flash-resident IDF code and panics
+//("Cache disabled but cached memory region accessed") whenever a LittleFS read (e.g. the web UI) has the flash cache disabled at that moment.
+//A single pixel is only 24 bits = 30us with interrupts off. Always called from the loop task, same as FastLED, so it never overlaps an RMT transmission.
+//The pin is driven through an S3 "dedicated GPIO" channel (a CPU instruction, ee.wr_mask_gpio_out) instead of GPIO_OUT_W1TS/W1TC register writes: those go
+//over the peripheral bus, which can stall while the other core is busy (WiFi, web server, PSRAM). A stretched 0-bit reads as a 1 and flashes the red/green subpixel.
+//The bundle only works on the core that created it, so initOnboardLed() must run from setup() (loop task, same core as loop()).
+#include "driver/dedic_gpio.h"
+#include "hal/cpu_ll.h"
+static dedic_gpio_bundle_handle_t onboardBundle = nullptr;
+static uint32_t onboardMask = 0;
+static portMUX_TYPE onboardMux = portMUX_INITIALIZER_UNLOCKED;
+static inline uint32_t IRAM_ATTR cycleCount() { uint32_t c; __asm__ __volatile__("rsr %0, ccount" : "=a"(c)); return c; }
+
+void initOnboardLed() {
+  pinMode(ONBOARD_LED_PIN, OUTPUT);
+  digitalWrite(ONBOARD_LED_PIN, LOW);
+  const int pins[] = {ONBOARD_LED_PIN};
+  dedic_gpio_bundle_config_t conf = {};
+  conf.gpio_array = pins;
+  conf.array_size = 1;
+  conf.flags.out_en = 1;
+  if(dedic_gpio_new_bundle(&conf, &onboardBundle) == ESP_OK) {
+    dedic_gpio_get_out_mask(onboardBundle, &onboardMask);
+  } else {
+    onboardBundle = nullptr; //showOnboardLed() falls back to plain register writes
+  }
+}
+
+void IRAM_ATTR showOnboardLed() {
+  const uint8_t bytes[3] = {scale8(onboardLed[0].g, onboardBrightness), scale8(onboardLed[0].r, onboardBrightness), scale8(onboardLed[0].b, onboardBrightness)}; //GRB, uncorrected
+  const uint32_t mhz = getCpuFrequencyMhz();
+  //0.3us/0.75us high, 1.25us per bit: middle of the WS2812-2020 spec (T0H 0.22-0.38us, T1H 0.58-1us) that small onboard LEDs use. The usual 5050 values
+  //(0.4/0.8us) are outside it, so a 0-bit with any extra delay read as a 1 and flashed the red/green subpixel. FastLED itself uses 0.25/0.875us.
+  const uint32_t t0h = mhz*300/1000, t1h = mhz*750/1000, period = mhz*1250/1000;
+  const bool dedic = onboardBundle != nullptr;
+  const uint32_t pinMask = 1UL << ONBOARD_LED_PIN;
+  portENTER_CRITICAL(&onboardMux);
+  uint32_t t = cycleCount();
+  for(uint8_t i = 0; i < 3; i++) {
+    for(uint8_t bit = 0x80; bit; bit >>= 1) {
+      const uint32_t high = (bytes[i] & bit) ? t1h : t0h;
+      while(cycleCount() - t < period) {}
+      t = cycleCount();
+      if(dedic) { cpu_ll_write_dedic_gpio_mask(onboardMask, onboardMask); } else { REG_WRITE(GPIO_OUT_W1TS_REG, pinMask); }
+      while(cycleCount() - t < high) {}
+      if(dedic) { cpu_ll_write_dedic_gpio_mask(onboardMask, 0); } else { REG_WRITE(GPIO_OUT_W1TC_REG, pinMask); }
+    }
+  }
+  portEXIT_CRITICAL(&onboardMux);
+}
+
+//Breathes the onboard LED from fully off to HEARTBEAT_MAX. Called from loop(), and from the startup message waits so it already breathes right after the POST.
+void updateHeartbeat() {
+  static unsigned long lastHeartbeat = 0;
+  if(lastHeartbeat+20 < millis()) {
+    lastHeartbeat = millis();
+    uint8_t level = beatsin8(HEARTBEAT_BPM, 0, HEARTBEAT_MAX);
+    if(level != onboardBrightness || onboardLed[0] != CRGB(HEARTBEAT_COLOR)) {
+      onboardLed[0] = HEARTBEAT_COLOR;
+      onboardBrightness = level;
+      showOnboardLed(); //separate from FastLED, so no need to resend the visor/ears
+    }
+  }
+}
+
+//FastLED's ESP32 RMT driver (idf4_rmt_impl.cpp) only transmits once showLeds() has been called on *every* registered controller, then sends all of them together.
+//Calling showLeds() on just one controller only latches its data until the others are called too, so frames get dropped/merged. Always push every controller at once.
+//Unchanged outputs are sent as just their first LED (setLeds(..., 1), ~30us) instead of skipped, since the batch needs every controller: the rest of that chain keeps
+//its data and nothing passes through it. Before this, e.g. rainbow ears (every rbSpeed) resent all 704 visor LEDs each time, blocking loop() ~21ms per push and
+//giving the marginal last visor panels a chance to corrupt the data passing through them (tail flicker, see the BOOT button self test) dozens of times a second.
+void showAllLeds() {
+  static CRGB sentVisor[MATRIXESNUM*64], sentEars[earLedsNum+blushLedsNum];
+  static int sentBVisor = -1, sentBEar = -1; //-1: nothing sent yet
+  bool visorChanged = cfg.bVisor != sentBVisor || memcmp(visorLeds, sentVisor, sizeof(sentVisor)) != 0;
+  bool earsChanged = cfg.bEar != sentBEar || memcmp(c2Leds, sentEars, sizeof(sentEars)) != 0;
+
+  if(visorChanged || earsChanged) {
+    if(ledController[0]) { //only registered for WS2812 visors
+      if(!visorChanged) { ledController[0]->setLeds(visorLeds, 1); }
+      ledController[0]->showLeds(cfg.bVisor);
+      ledController[0]->setLeds(visorLeds, visorLedsNum);
+    }
+    if(ledController[1]) { //only registered with ears and/or blush
+      if(!earsChanged) { ledController[1]->setLeds(c2Leds, 1); }
+      ledController[1]->showLeds(cfg.bEar);
+      ledController[1]->setLeds(c2Leds, earLedsNum+blushLedsNum);
+    }
+    memcpy(sentVisor, visorLeds, sizeof(sentVisor));
+    memcpy(sentEars, c2Leds, sizeof(sentEars));
+    sentBVisor = cfg.bVisor;
+    sentBEar = cfg.bEar;
+  }
+  showOnboardLed();
+}
+
+//--------------------------------//POST
+//c2Leds index -> is that pixel on the blush strip? (same ear-blush-ear chaining as the render code in loop())
+bool isBlushPixel(uint16_t i) {
+  if(blushPresent && earPresent) { return i >= (earLedsNum/2) && i < (earLedsNum/2)+blushLedsNum; }
+  return blushPresent;
+}
+
+//Blush color as it has to be sent: red-green swapped for an RGB-ordered strip (useRGBblush). Applied to the copy going into c2Leds, never to blushLeds itself:
+//loop() used to swap blushLeds in place on every display pass, so between blush frame changes it flipped back and forth (e.g. purple <-> teal with animated ears).
+CRGB blushOut(CRGB c) {
+  if(useRGBblush) { uint8_t t = c.r; c.r = c.g; c.g = t; }
+  return c;
+}
+
+//Walks a lit pixel through every visor matrix in parallel (one per matrix, so 64 steps for the whole visor) and one down the ears/blush chain at the same
+//time, once per color, so every pixel can be checked by eye. The ears/blush chain is a separate data line, so it's still obvious where a dead pixel is.
+void runPOST() {
+  const CRGB colors[] = {CRGB::White, CRGB::Red, CRGB::Lime, CRGB::Blue}; //Lime = full green (0x00FF00); FastLED's CRGB::Green is HTML green (0x008000), only half
+  const char *names[] = {"white", "red", "green", "blue"};
+  bool doVisor = visorType == "WS2812";
+  bool doEars = earPresent || blushPresent;
+  uint16_t c2Num = (earPresent ? earLedsNum : 0) + (blushPresent ? blushLedsNum : 0);
+  uint16_t steps = max(doVisor ? (uint16_t)64 : (uint16_t)0, doEars ? c2Num : (uint16_t)0);
+
+  logPrint(F("[I] POST: LED walk test start"));
+  for(uint8_t c = 0; c < 4; c++) {
+    logPrint("[I] POST: walking " + String(names[c]));
+    onboardBrightness = HEARTBEAT_MAX;
+    for(uint16_t pos = 0; pos < steps; pos++) {
+      onboardLed[0] = ((millis() / POST_BLINK_MS) % 2) ? CRGB::Black : colors[c]; //onboard LED blinks the current walk color, so it's clearly distinct from the steady startup/heartbeat colors
+      if(doVisor && pos < 64) { for(uint8_t m = 0; m < MATRIXESNUM; m++) { visorLeds[(m*64)+pos] = colors[c]; } }
+      if(doEars && pos < c2Num) {
+        c2Leds[pos] = colors[c];
+        if(isBlushPixel(pos)) { c2Leds[pos] = blushOut(c2Leds[pos]); } //same red-green handling as loop()
+      }
+      showAllLeds();
+      if(doVisor && pos < 64) { for(uint8_t m = 0; m < MATRIXESNUM; m++) { visorLeds[(m*64)+pos] = CRGB::Black; } }
+      if(doEars && pos < c2Num) { c2Leds[pos] = CRGB::Black; }
+      delay(POST_STEP_MS);
+    }
+  }
+  onboardLed[0] = HEARTBEAT_COLOR; //steady heartbeat color while WiFi/BLE/sensors init (blocking, can't breathe), updateHeartbeat() takes over from the startup messages on
+  onboardBrightness = HEARTBEAT_MAX;
+  showAllLeds(); //last pixel off
+  logPrint(F("[I] POST: LED walk test done"));
+}
+
+//--------------------------------//Startup message
+extern const uint8_t PROGMEM _sysfont[]; //MD_MAX72XX's built-in 5x7 font (declared in its internal MD_MAX72xx_lib.h)
+
+//Same LED index mapping as setAllVisor(): seg = matrix in the chain, row/col = 0..7 from the top-left
+uint16_t visorIndex(uint8_t seg, uint8_t row, uint8_t col) {
+  return (seg*64)+(row*8)+((oldMatrixFix && row%2==0)?7-col:col);
+}
+
+//Modules that failed to init during setup(), shown on the visor instead of STARTUP_OK_MSG
+const char *initErrors[8];
+uint8_t initErrorNum = 0;
+void addInitError(const char *name) {
+  if(initErrorNum < 8) { initErrors[initErrorNum++] = name; }
+}
+
+//Shows one line for STARTUP_MSG_MS, one character per matrix in chain order (matrix 0 = first character), each character centered on its matrix.
+//Lines shorter than MATRIXESNUM are centered across the chain; pad with spaces to place them yourself.
+void showMsgLine(const char *msg, CRGB color) {
+  uint8_t len = min(strlen(msg), (size_t)MATRIXESNUM);
+  if(len == 0) { return; }
+  uint8_t first = (MATRIXESNUM - len) / 2;
+  fill_solid(visorLeds, visorLedsNum, CRGB::Black);
+  for(uint8_t k = 0; k < len; k++) {
+    uint8_t cols[8];
+    uint8_t width = mx.getChar((uint8_t)msg[k], sizeof(cols), cols); //one byte per column, bit 0 = top row
+    uint8_t x0 = (8 - width) / 2;
+    for(uint8_t x = 0; x < width; x++) {
+      for(uint8_t y = 0; y < 8; y++) {
+        if(bitRead(cols[x], y)) { visorLeds[visorIndex(first+k, y, x0+x)] = color; }
+      }
+    }
+  }
+  logPrint("[I] Startup message: " + String(msg));
+  showAllLeds();
+  for(unsigned long start = millis(); millis() - start < STARTUP_MSG_MS; ) { updateHeartbeat(); delay(5); }
+}
+
+//Runs at the end of setup(), once every module has been initialized: STARTUP_OK_MSG in green if all of them came up, otherwise one red line per failed module,
+//then the STARTUP_MSG lines in the visor color (cfg.visColor). The last line stays up until the first animation frame replaces (fades over) it.
+void showStartupMsg() {
+  const char *lines[] = STARTUP_MSG;
+  if(visorType != "WS2812") { return; }
+
+  mx.setFont(_sysfont); //normally set by mx.begin(), which only runs for MAX72XX visors; getChar() itself needs no MAX72XX hardware
+  if(initErrorNum == 0) {
+    showMsgLine(STARTUP_OK_MSG, CRGB::Lime); //full green, see runPOST()
+  } else {
+    for(uint8_t i = 0; i < initErrorNum; i++) { showMsgLine(initErrors[i], CRGB::Red); }
+  }
+  CRGB color = cfg.visColor ? CRGB((uint32_t)cfg.visColor) : CRGB::White; //same color as the visor
+  for(const char *msg : lines) { showMsgLine(msg, color); }
+}
+
 //--------------------------------//Setup
 void setup() {
+  //onboard LED on first thing, so you can see the board is powered/booting before LittleFS/PSRAM/config (and the POST) even start
+  initOnboardLed();
+  onboardLed[0] = CRGB::Blue; //startup color, until the POST takes over
+  onboardBrightness = HEARTBEAT_MAX;
+  showOnboardLed();
+
   Serial.begin(115200);
+  while(!Serial && millis() < 3000) { delay(10); } //native USB CDC re-enumerates after reset; give the serial monitor a moment to reconnect so early logs (POST) aren't lost. Boots on without a host after 3s
 
   pinMode(animBtn, INPUT_PULLUP);
   pinMode(0, INPUT_PULLUP);
@@ -754,6 +972,7 @@ void setup() {
 
   if(!cfg.load()) {
     logPrint(F("[E] An Error has occurred while loading config file! Loading defaults"));
+    addInitError("CFG ERR");
     cfg.setDefault();
   }
 
@@ -782,8 +1001,12 @@ void setup() {
   if(blushPresent) {
     ledController[2] = &FastLED.addLeds<WS2812B, DATA_PIN_BLUSH, RGB>(blushLeds, blushLedsNum);
   }*/
-  FastLED.setCorrection(TypicalPixelString);
+  FastLED.setCorrection(TypicalPixelString); //not applied to the onboard LED (showOnboardLed() is uncorrected): it would scale blue to 140/255, leaving only ~4 visible heartbeat steps at HEARTBEAT_MAX 8
   FastLED.setDither(0);
+
+#if POST_ENABLED
+  runPOST();
+#endif
 
   startWiFiWeb();
 
@@ -791,6 +1014,7 @@ void setup() {
   if(cfg.bleEna) { //you can disable BLE in config
     if(!startBLE()) {
       logPrint(F("[E] An Error has occurred while starting BLE!"));
+      addInitError("BLE ERR");
     }
   }
 
@@ -808,6 +1032,7 @@ void setup() {
   if(cfg.tiltEna) {
     if(myIMU.begin()) {
       logPrint(F("[E] An Error has occurred while initializing LSM!"));
+      addInitError("TILT ERR");
       cfg.tiltEna = false;
     } else {
       tiltInitDone = true;
@@ -817,6 +1042,7 @@ void setup() {
   if(cfg.oledEna) {
     if(!oled.init(oledAddr,cfg.bOled,cfg.inaEna,cfg.oledFlip)) {
       logPrint(F("[E] An Error has occurred while initializing SSD1306!"));
+      addInitError("OLED ERR");
       cfg.oledEna = false;
     } else {
       oledInitDone = true;
@@ -828,6 +1054,7 @@ void setup() {
   if(cfg.inaEna && oledInitDone) {
     if(!ina219.begin()) {
       logPrint(F("[E] An Error has occurred while initializing INA219 chip!"));
+      addInitError("INA ERR");
       cfg.inaEna = false;
     } else {
       ina219.setCalibration_16V_8A();
@@ -839,6 +1066,7 @@ void setup() {
     if(!apds.begin()){
       cfg.boopEna = false;
       logPrint("[E] An Error has occurred while initializing APDS9960 chip! (raw ID reg: 0x"+String(apdsRawID(),HEX)+")");
+      addInitError("BOOP ERR");
     } else {
       ToFInitDone = true;
       apds.enableProximity(true);
@@ -863,8 +1091,11 @@ void setup() {
         }
       }
     }
+    if(!ToFInitDone) { addInitError("BOOP ERR"); } //any of the three VL53L1X failures above
   }
-  
+
+  showStartupMsg(); //last, so "PROTOGEN OK" (or the failures) reflect every module above
+
   while(millis()<2000) {yield();} //2s delay for the anim to load properly (idk why but it doesnt without this or with 1s)
   loadAnim("default.json","");
 
@@ -877,7 +1108,7 @@ String oldanim, boopoldanim;
 bool FdisplayVisor = false, FdisplayBlush = false, FdisplayEar = false, booping = false, wasTilt = false, boopRea = false, remoteSign = false, speaking = true;
 float zAx,yAx,finalMicAvg,avgMicArr[10], micAttack = 0.35f, micRelease = 0.2f, env = 0.0f;
 int boopRead, startIndex = 1, micVolume, currentMicAvg = 0, btnNum = 0, currFade = 1, apdsprox = 255, apdsLastProx = -1;
-unsigned long lastMillsEars = 0, lastMillsVisor = 0, lastMillsTilt = 0, laskSpeakCheck = 0, lastMillsBoop = 0, lastFLED = 0, vaStatLast = 0, btnPressTime = 0, tiltChange = 0, check0button = 0, looptime = 0, fadeTime = 0, laskSpeakAnim = 0, lastBoopCheck = 0, lastOledThumbUpdate = 0, lastProxDebug = 0, apdsLastChange = 0;
+unsigned long lastMillsEars = 0, lastMillsVisor = 0, lastMillsTilt = 0, laskSpeakCheck = 0, lastMillsBoop = 0, lastFLED = 0, lastFLEDvisor = 0, vaStatLast = 0, btnPressTime = 0, tiltChange = 0, check0button = 0, looptime = 0, fadeTime = 0, laskSpeakAnim = 0, lastBoopCheck = 0, lastOledThumbUpdate = 0, lastProxDebug = 0, apdsLastChange = 0;
 
 void dynamicSpeak(uint64_t *leds, long colors[MATRIXESNUM][64], bool isMouth[MATRIXESNUM], int volume) {
   int mouthIndexes[MATRIXESNUM];
@@ -958,8 +1189,50 @@ void setAllVisor(struct CRGB *ledArray, long ledColor, int visorFrame) {
   }
 }
 
+//--------------------------------//LED self test (BOOT button)
+//A short press (<1s) of the board's BOOT button (GPIO0) cycles: off -> A (every visor/ears/blush LED lit once, then nothing is sent) -> B (same frame, resent
+//continuously) -> off (back to the animation). Flicker in A can't be the data (nothing is transmitted), so it's power/hardware; flicker only in B is the transfer.
+//Holding BOOT for 10s still resets the config (that check runs at the end of loop(), which is skipped while a test runs, so exit the test first).
+#define SELFTEST_BRIGHTNESS 8
+#define SELFTEST_COLOR CRGB::White //all subpixels: roughly 1.2A at 8/255 on top of the idle draw (CRGB::Blue would be ~0.3A, e.g. on USB power)
+uint8_t selfTestMode = 0;
+
+void showSelfTest() {
+  fill_solid(visorLeds, visorLedsNum, SELFTEST_COLOR);
+  fill_solid(c2Leds, earLedsNum+blushLedsNum, SELFTEST_COLOR);
+  if(ledController[0]) { ledController[0]->showLeds(SELFTEST_BRIGHTNESS); }
+  if(ledController[1]) { ledController[1]->showLeds(SELFTEST_BRIGHTNESS); }
+}
+
+//Returns true while a test is running, so loop() skips the normal rendering
+bool handleSelfTest() {
+  static unsigned long pressStart = 0;
+  static bool wasPressed = false;
+  bool pressed = digitalRead(0) == LOW;
+  if(pressed && !wasPressed) { pressStart = millis(); }
+  if(!pressed && wasPressed && millis() - pressStart >= 50 && millis() - pressStart < 1000) {
+    selfTestMode = (selfTestMode + 1) % 3;
+    if(selfTestMode == 1) {
+      logPrint(F("[I] Self test A: all LEDs lit once, nothing sent afterwards"));
+      showSelfTest();
+    } else if(selfTestMode == 2) {
+      logPrint(F("[I] Self test B: same frame resent continuously"));
+    } else {
+      logPrint(F("[I] Self test off"));
+      instantReload = true; //re-render the current animation (fades over the test frame)
+      FdisplayEar = true;
+      FdisplayBlush = true;
+    }
+  }
+  wasPressed = pressed;
+  if(selfTestMode == 2) { showSelfTest(); }
+  return selfTestMode != 0;
+}
+
 void loop() {
   ElegantOTA.loop();
+  updateHeartbeat(); //onboard LED breathes as long as loop() keeps running
+  if(handleSelfTest()) { return; }
   //--------------------------------//EAR Leds render
   if(earPresent) {
     if(earsNow->type == 0) { //custom
@@ -971,36 +1244,42 @@ void loop() {
         FdisplayEar = true;
       }
     } else if (earsNow->type == 1) { //rainbow
-      fill_rainbow(pixelBuffer, 4, millis()/cfg.rbSpeed, 255/cfg.rbWidth);
-      if(earLedsNum == 74) {
-        for(int x = 0;x<earLedsNum;x++) {
-          if(x<16) {
+      if(lastFLED+cfg.rbSpeed < millis()) { //throttle: was recomputing/pushing every loop() tick, hammering the shared RMT channel and glitching the tail LED (#82)
+        lastFLED = millis();
+        fill_rainbow(pixelBuffer, 4, millis()/cfg.rbSpeed, 255/cfg.rbWidth);
+        if(earLedsNum == 74) {
+          for(int x = 0;x<earLedsNum;x++) {
+            if(x<16) {
+              earLeds[x] = pixelBuffer[0];
+              earLeds[x+37] = pixelBuffer[0];
+            } else if(x<28) {
+              earLeds[x] = pixelBuffer[1];
+              earLeds[x+37] = pixelBuffer[1];
+            } else if(x<36) {
+              earLeds[x] = pixelBuffer[2];
+              earLeds[x+37] = pixelBuffer[2];
+            } else if(x==36) {
+              earLeds[x] = pixelBuffer[3];
+              earLeds[x+37] = pixelBuffer[3];
+            }
+          }
+        } else {
+          for(int x = 0;x<earLedsNum;x++) {
             earLeds[x] = pixelBuffer[0];
-            earLeds[x+37] = pixelBuffer[0];
-          } else if(x<28) {
-            earLeds[x] = pixelBuffer[1];
-            earLeds[x+37] = pixelBuffer[1];
-          } else if(x<36) {
-            earLeds[x] = pixelBuffer[2];
-            earLeds[x+37] = pixelBuffer[2];
-          } else if(x==36) {
-            earLeds[x] = pixelBuffer[3];
-            earLeds[x+37] = pixelBuffer[3];
           }
         }
-      } else {
-        for(int x = 0;x<earLedsNum;x++) {
-          earLeds[x] = pixelBuffer[0];
-        }
+        FdisplayEar = true;
       }
-      FdisplayEar = true;
     } else if (earsNow->type == 2) { //white_noise
-      memset(noiseData, 0, earLedsNum);
-      fill_raw_noise8(noiseData, earLedsNum, 2, 0, 50, millis()/4);
-      for(int x = 0;x<earLedsNum;x++) {
-        earLeds[x] = ColorFromPalette(blackWhite, noiseData[x]);
+      if(lastFLED+cfg.rbSpeed < millis()) { //throttle: same unbounded-refresh issue as rainbow above
+        lastFLED = millis();
+        memset(noiseData, 0, earLedsNum);
+        fill_raw_noise8(noiseData, earLedsNum, 2, 0, 50, millis()/4);
+        for(int x = 0;x<earLedsNum;x++) {
+          earLeds[x] = ColorFromPalette(blackWhite, noiseData[x]);
+        }
+        FdisplayEar = true;
       }
-      FdisplayEar = true;
     } else if (earsNow->type == 3 && earLedsNum == 74) { //corner_sabers - only 74 led mode
       if(lastFLED+cfg.rbSpeed < millis()) {
         lastFLED = millis();
@@ -1019,15 +1298,18 @@ void loop() {
         FdisplayEar = true;
       }
     } else if (earsNow->type == 4) { //custom_glow
-      fill_rainbow(pixelBuffer, 4, millis()/cfg.rbSpeed, 255/cfg.rbWidth);
-      for(int y = 0; y < earLedsNum; y++) {
-        if(earsNow->frames[0].ledColor[y] == 0) {
-          earLeds[y] = 0x000000;
-        } else {
-          earLeds[y] = pixelBuffer[0];
+      if(lastFLED+cfg.rbSpeed < millis()) { //throttle: same unbounded-refresh issue as rainbow above
+        lastFLED = millis();
+        fill_rainbow(pixelBuffer, 4, millis()/cfg.rbSpeed, 255/cfg.rbWidth);
+        for(int y = 0; y < earLedsNum; y++) {
+          if(earsNow->frames[0].ledColor[y] == 0) {
+            earLeds[y] = 0x000000;
+          } else {
+            earLeds[y] = pixelBuffer[0];
+          }
         }
+        FdisplayEar = true;
       }
-      FdisplayEar = true;
     } else if (earsNow->type == 5) {} //none
   }
 
@@ -1051,11 +1333,14 @@ void loop() {
       if(currentVisorFrame == visorNow->numOfFrames) { currentVisorFrame = 0; }
       instantReload = false;
     }
-    fill_rainbow(visorPixelBuffer, 1, millis()/cfg.rbSpeed, 128/cfg.rbWidth);
-    setAllVisor(visorLeds,((long)visorPixelBuffer[0].r << 16) | ((long)visorPixelBuffer[0].g << 8 ) | (long)visorPixelBuffer[0].b,currentVisorFrame);
-    if(blushPresent) {
-      for(int x = 0; x<blushLedsNum; x++) { blushLeds[x] = visorNow->frames[currentVisorFrame].ledsBlush[x]; } //set blush leds
-      FdisplayBlush = true;
+    if(lastFLEDvisor+cfg.rbSpeed < millis()) { //throttle: was recomputing/pushing every loop() tick, same as the ears rainbow fix -- testing whether visor+ears RMT contention is behind the led82 glitch
+      lastFLEDvisor = millis();
+      fill_rainbow(visorPixelBuffer, 1, millis()/cfg.rbSpeed, 128/cfg.rbWidth);
+      setAllVisor(visorLeds,((long)visorPixelBuffer[0].r << 16) | ((long)visorPixelBuffer[0].g << 8 ) | (long)visorPixelBuffer[0].b,currentVisorFrame);
+      if(blushPresent) {
+        for(int x = 0; x<blushLedsNum; x++) { blushLeds[x] = visorNow->frames[currentVisorFrame].ledsBlush[x]; } //set blush leds
+        FdisplayBlush = true;
+      }
     }
   }
 
@@ -1363,13 +1648,13 @@ void loop() {
         if(visorNow->type == 0) {
           if(FADESTEPS == 0) { //just fading
             memcpy(visorLeds, visorLedsNEW, sizeof(CRGB) * visorLedsNum);
-            ledController[0]->showLeds(cfg.bVisor);
+            pushLeds = true;
             FdisplayVisor = false;
           } else if(fadeTime + (visorLedsNum*0.03) < millis()) {
             for (uint16_t i = 0; i < visorLedsNum; i++) {
               visorLeds[i] = blend(visorLeds[i], visorLedsNEW[i], (currFade * 255) / FADESTEPS);
             }
-            ledController[0]->showLeds(cfg.bVisor); //visor
+            pushLeds = true;
             currFade++;
             if(currFade > FADESTEPS) {
               memcpy(visorLeds, visorLedsNEW, sizeof(CRGB) * visorLedsNum);
@@ -1387,7 +1672,7 @@ void loop() {
           memcpy(visorLeds, visorLedsNEW, sizeof(CRGB) * visorLedsNum);
           FdisplayVisor = false;*/
         } else {
-          ledController[0]->showLeds(cfg.bVisor);
+          pushLeds = true;
           FdisplayVisor = false;
         }
       }
@@ -1400,36 +1685,29 @@ void loop() {
         FdisplayVisor = false;
       }
     }
-    if(blushPresent && useRGBblush) {
-      for(int i = 0; i < blushLedsNum; i++) {
-        uint32_t temp = blushLeds[i].r;
-        blushLeds[i].r = blushLeds[i].g;
-        blushLeds[i].g = temp;
-      }
-    }
     if(earPresent && !blushPresent && FdisplayEar) { //RMT4 2 controllers fix
       for(int i = 0; i < earLedsNum; i++) {
         c2Leds[i] = earLeds[i];
       }
-      ledController[1]->showLeds(cfg.bEar);
+      pushLeds = true;
       FdisplayEar = false;
     } else if (blushPresent && !earPresent && FdisplayBlush) {
       for(int i = 0; i < blushLedsNum; i++) {
-        c2Leds[i] = blushLeds[i];
+        c2Leds[i] = blushOut(blushLeds[i]);
       }
-      ledController[1]->showLeds(cfg.bEar);
+      pushLeds = true;
       FdisplayBlush = false;
     } else if (blushPresent && earPresent && (FdisplayBlush || FdisplayEar)) { //ear-blush-ear
       for(int i = 0; i < (earLedsNum/2); i++) {
         c2Leds[i] = earLeds[i];
       }
       for(int i = (earLedsNum/2); i < (earLedsNum/2)+blushLedsNum; i++) {
-        c2Leds[i] = blushLeds[i-(earLedsNum/2)];
+        c2Leds[i] = blushOut(blushLeds[i-(earLedsNum/2)]);
       }
       for(int i = (earLedsNum/2)+blushLedsNum; i < earLedsNum+blushLedsNum; i++) {
         c2Leds[i] = earLeds[i-blushLedsNum];
       }
-      ledController[1]->showLeds(cfg.bEar);
+      pushLeds = true;
       FdisplayEar = false;
       FdisplayBlush = false;
     }
@@ -1441,6 +1719,10 @@ void loop() {
       ledController[2]->showLeds(cfg.bBlush); //blush
       FdisplayBlush = false;
     }*/
+  }
+  if(pushLeds) { //one push per loop pass, see showAllLeds()
+    showAllLeds();
+    pushLeds = false;
   }
 
   //press boot button for 10sec to reset
